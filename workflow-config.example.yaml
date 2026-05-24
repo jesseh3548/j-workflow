@@ -1,0 +1,31 @@
+# ============================================================
+# Multi-Agent Workflow 配置模板
+# 复制到项目目录下重命名为 .workflow-config.yaml
+# ============================================================
+
+# 项目路径（必填，使用 --config 时需指定）
+project_dir: ~/code/your-project
+
+# 工作区目录（可选，默认 <project_dir>/.workflow）
+# workspace_dir: ./.workflow
+
+# Claude 模型（可选）
+# model: claude-sonnet-4-6
+
+# ── 阶段开关 ──
+# true = 启用, false = 跳过
+
+explore: false        # 需求探索（研发主导需求时开启）
+design: true          # 方案设计
+review_plan: true     # 方案评审
+implement: true       # TDD 实现
+review_code: true     # 代码评审
+
+# ── 断点配置 ──
+# true = 该阶段后暂停等待确认, false = 自动继续
+
+after_explore: false
+after_design: true    # 方案设计后停下，审阅方案
+after_review: true    # 方案评审后停下，审阅评审报告
+after_implement: false
+after_review_code: true
