@@ -1,6 +1,9 @@
 #!/bin/bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BIN_DIR="$SCRIPT_DIR/bin"
+
 # ============================================================
 # Multi-Agent Development Orchestrator
 # 多 Agent 协同开发编排器
@@ -31,7 +34,10 @@ EXPLORE_IDEA=""
 TASK_NAME=""
 WORKSPACE_DIR=""
 CONFIG_FILE=""
+PROVIDER=""
+PROVIDER_FROM_CLI=false
 MODEL="claude-sonnet-4-6"
+MODEL_FROM_USER=false
 SKIP_PHASES=()
 AUTO_MODE=false
 RESUME_MODE=false
@@ -94,6 +100,48 @@ wait_for_user() {
     esac
 }
 
+detect_provider() {
+    if [[ -n "$PROVIDER" ]]; then
+        case "$PROVIDER" in
+            claude|codex) return 0 ;;
+            *) log_error "未知 provider: $PROVIDER（仅支持 claude/codex）"; exit 1 ;;
+        esac
+    fi
+
+    if printenv | grep -q '^CODEX_' && command -v codex >/dev/null 2>&1; then
+        PROVIDER="codex"
+    elif command -v claude >/dev/null 2>&1; then
+        PROVIDER="claude"
+    elif command -v codex >/dev/null 2>&1; then
+        PROVIDER="codex"
+    else
+        log_error "无法找到可用 agent CLI：需要 claude 或 codex"
+        exit 1
+    fi
+}
+
+detect_codex_default_model() {
+    local config_file="${CODEX_HOME:-$HOME/.codex}/config.toml"
+    if [[ -f "$config_file" ]]; then
+        local configured_model
+        configured_model="$(awk -F= '/^[[:space:]]*model[[:space:]]*=/{ gsub(/[[:space:]"]/, "", $2); print $2; exit }' "$config_file")"
+        if [[ -n "$configured_model" ]]; then
+            echo "$configured_model"
+            return 0
+        fi
+    fi
+    echo "gpt-5.5"
+}
+
+state_cmd() {
+    "$BIN_DIR/workflow-state" "$@"
+}
+
+get_phase_session_id() {
+    local phase_name="$1"
+    state_cmd get-session-id --file "$STATE_FILE" --phase "$phase_name" 2>/dev/null || true
+}
+
 parse_config() {
     local config_file="$1"
     if [[ ! -f "$config_file" ]]; then
@@ -112,7 +160,12 @@ parse_config() {
         case "$key" in
             project_dir) PROJECT_DIR="$value" ;;
             workspace_dir) WORKSPACE_DIR="$value" ;;
-            model) MODEL="$value" ;;
+            provider)
+                if [[ "$PROVIDER_FROM_CLI" != true ]]; then
+                    PROVIDER="$value"
+                fi
+                ;;
+            model) MODEL="$value"; MODEL_FROM_USER=true ;;
             explore) PHASE_EXPLORE="$value" ;;
             design) PHASE_DESIGN="$value" ;;
             review_plan) PHASE_REVIEW_PLAN="$value" ;;
@@ -140,7 +193,8 @@ Options:
   --idea <text>           探索阶段的想法/方向（一句话即可）
   --config <file>         配置文件路径 (.workflow-config.yaml)
   --workspace <dir>       工作区目录 (默认: <project>/.workflow)
-  --model <model>         Claude 模型 (默认: claude-sonnet-4-6)
+  --provider <provider>   Agent provider (claude/codex，默认自动推断)
+  --model <model>         Agent 模型（Claude 默认 claude-sonnet-4-6；Codex 默认读取 ~/.codex/config.toml）
   --explore               启用探索阶段
   --skip <phase>          跳过指定阶段 (explore/design/review/implement/review-code)
   --auto                  全自动模式（无断点）
@@ -179,7 +233,8 @@ while [[ $# -gt 0 ]]; do
         --name) TASK_NAME="$2"; shift 2 ;;
         --config) CONFIG_FILE="$2"; shift 2 ;;
         --workspace) WORKSPACE_DIR="$2"; shift 2 ;;
-        --model) MODEL="$2"; shift 2 ;;
+        --provider) PROVIDER="$2"; PROVIDER_FROM_CLI=true; shift 2 ;;
+        --model) MODEL="$2"; MODEL_FROM_USER=true; shift 2 ;;
         --explore) PHASE_EXPLORE=true; shift ;;
         --skip)
             case "$2" in
@@ -222,6 +277,11 @@ done
 # Load config file if specified
 if [[ -n "$CONFIG_FILE" ]]; then
     parse_config "$CONFIG_FILE"
+fi
+
+detect_provider
+if [[ "$PROVIDER" == "codex" && "$MODEL_FROM_USER" != true ]]; then
+    MODEL="$(detect_codex_default_model)"
 fi
 
 # Validate required args
@@ -267,9 +327,20 @@ DIR_DESIGN="$WORKSPACE_DIR/design"
 DIR_REVIEW="$WORKSPACE_DIR/review"
 DIR_IMPLEMENT="$WORKSPACE_DIR/implement"
 DIR_REVIEW_CODE="$WORKSPACE_DIR/review-code"
+STATE_FILE="$WORKSPACE_DIR/workflow-state.json"
+WORKFLOW_ID="$(basename "$PROJECT_DIR")-${TASK_NAME}-$(date +%Y%m%d%H%M%S)"
 
 # Create workspace and phase directories
 mkdir -p "$WORKSPACE_DIR" "$DIR_EXPLORE" "$DIR_DESIGN" "$DIR_REVIEW" "$DIR_IMPLEMENT" "$DIR_REVIEW_CODE"
+
+state_cmd init \
+    --file "$STATE_FILE" \
+    --workflow-id "$WORKFLOW_ID" \
+    --task-name "$TASK_NAME" \
+    --provider "$PROVIDER" \
+    --model "$MODEL" \
+    --project-dir "$PROJECT_DIR" \
+    --workspace-dir "$WORKSPACE_DIR"
 
 # Copy requirement to workspace root (if provided)
 if [[ -n "$REQUIREMENT_FILE" ]]; then
@@ -281,10 +352,10 @@ if [[ -n "$EXPLORE_IDEA" ]]; then
     echo "$EXPLORE_IDEA" > "$WORKSPACE_DIR/idea.txt"
 fi
 
-# Check for CLAUDE.md
-if [[ ! -f "$PROJECT_DIR/CLAUDE.md" ]]; then
-    log_warn "项目目录中没有 CLAUDE.md，agent 将缺少项目特有的约束和规范"
-    log_warn "建议在 $PROJECT_DIR/CLAUDE.md 中记录：编码风格、框架约定、特殊依赖等"
+# Check for agent project instructions
+if [[ ! -f "$PROJECT_DIR/CLAUDE.md" && ! -f "$PROJECT_DIR/AGENTS.md" ]]; then
+    log_warn "项目目录中没有 CLAUDE.md 或 AGENTS.md，agent 将缺少项目特有的约束和规范"
+    log_warn "建议记录编码风格、框架约定、特殊依赖等项目指南"
     echo ""
 fi
 
@@ -296,114 +367,13 @@ if [[ -n "$EXPLORE_IDEA" ]]; then
     log_info "探索想法: $EXPLORE_IDEA"
 fi
 log_info "工作区:   $WORKSPACE_DIR"
+log_info "Provider: $PROVIDER"
 log_info "模型:     $MODEL"
 log_info "自动模式: $AUTO_MODE"
 if [[ "$RESUME_MODE" == true ]]; then
     log_info "续跑模式: 已有产出的阶段将被跳过"
 fi
 echo ""
-
-# ============================================================
-# Terminal detection — 检测当前 Ghostty 窗口，用于后续在同一窗口开新 tab
-# Ghostty 1.3.0+ 原生 AppleScript API: new tab / split / input text
-# ============================================================
-
-GHOSTTY_WINDOW_ID=""
-
-detect_terminal() {
-    # 给当前 tab 设置唯一标题，通过标题定位窗口（支持多窗口场景）
-    local marker="orchestrator-$$-$(date +%s)"
-    printf '\033]2;%s\007' "$marker"
-    sleep 0.3
-
-    GHOSTTY_WINDOW_ID=$(osascript -e "
-        tell application \"Ghostty\"
-            repeat with w in windows
-                repeat with t in tabs of w
-                    if name of t contains \"$marker\" then
-                        return id of w
-                    end if
-                end repeat
-            end repeat
-            return \"not_found\"
-        end tell
-    " 2>/dev/null || echo "not_found")
-
-    if [[ "$GHOSTTY_WINDOW_ID" == "not_found" || -z "$GHOSTTY_WINDOW_ID" ]]; then
-        log_warn "无法定位当前 Ghostty 窗口，将使用新窗口"
-        GHOSTTY_WINDOW_ID=""
-    else
-        log_info "终端: Ghostty (窗口: ${GHOSTTY_WINDOW_ID})"
-    fi
-}
-
-# 在当前 Ghostty 窗口中打开新 tab 执行脚本
-# 用法: open_ghostty_tab "script_path" "working_dir" "verify_file"
-# 使用 Ghostty 原生 AppleScript: new tab + surface configuration (command 字段)
-open_ghostty_tab() {
-    local script_path="$1"
-    local working_dir="$2"
-    local verify_file="${3:-}"
-    local max_retries=3
-    local attempt=0
-
-    while [[ $attempt -lt $max_retries ]]; do
-        attempt=$((attempt + 1))
-
-        if [[ -n "$GHOSTTY_WINDOW_ID" ]]; then
-            # 原生 API：在指定窗口开新 tab
-            osascript -e "
-                tell application \"Ghostty\"
-                    set cfg to new surface configuration
-                    set initial working directory of cfg to \"$working_dir\"
-                    set command of cfg to \"bash $script_path\"
-                    set wait after command of cfg to true
-                    set environment variables of cfg to {\"NODE_TLS_REJECT_UNAUTHORIZED=0\"}
-                    set win to window id \"$GHOSTTY_WINDOW_ID\"
-                    new tab in win with configuration cfg
-                end tell
-            " 2>/dev/null
-        else
-            # fallback：开新窗口
-            osascript -e "
-                tell application \"Ghostty\"
-                    set cfg to new surface configuration
-                    set initial working directory of cfg to \"$working_dir\"
-                    set command of cfg to \"bash $script_path\"
-                    set wait after command of cfg to true
-                    set environment variables of cfg to {\"NODE_TLS_REJECT_UNAUTHORIZED=0\"}
-                    new window with configuration cfg
-                end tell
-            " 2>/dev/null
-        fi
-
-        # 如果没有验证文件，直接返回
-        if [[ -z "$verify_file" ]]; then
-            return 0
-        fi
-
-        # 等待验证文件出现（最长 15s）
-        local waited=0
-        while [[ $waited -lt 15 ]]; do
-            if [[ -f "$verify_file" ]]; then
-                return 0
-            fi
-            sleep 1
-            waited=$((waited + 1))
-        done
-
-        # 未出现，重试
-        if [[ $attempt -lt $max_retries ]]; then
-            log_warn "第 ${attempt} 次开 tab 可能失败，${attempt}s 后重试..."
-            sleep "$attempt"
-        else
-            log_error "开 tab 失败（已重试 ${max_retries} 次）"
-            return 1
-        fi
-    done
-}
-
-detect_terminal
 
 # ============================================================
 # Phase execution
@@ -415,12 +385,26 @@ run_phase() {
     local prompt="$3"
     local output_file="$4"
     local log_dir="$5"  # 日志输出目录
-    local resume_session="${6:-}"  # 可选：要 resume 的 session name
+    local resume_phase="${6:-}"  # 可选：要 resume 的 phase name
 
     local session_name="${TASK_NAME}-${phase_name}"
+    local resume_session_name=""
+    local resume_session_id=""
 
-    if [[ -n "$resume_session" ]]; then
-        log_info "续接 session: $resume_session → $session_name"
+    if [[ -n "$resume_phase" ]]; then
+        resume_session_name="${TASK_NAME}-${resume_phase}"
+        resume_session_id="$(get_phase_session_id "$resume_phase")"
+    fi
+
+    if [[ -n "$resume_phase" ]]; then
+        if [[ -n "$resume_session_id" ]]; then
+            log_info "续接 session: $resume_phase ($resume_session_id)"
+        elif [[ "$PROVIDER" == "claude" ]]; then
+            log_warn "未找到 $resume_phase 的 session_id，将回退到 session name: $resume_session_name"
+        else
+            log_error "未找到 $resume_phase 的 session_id，codex 无法可靠续接"
+            exit 1
+        fi
     else
         log_info "启动 session: $session_name"
     fi
@@ -447,11 +431,14 @@ DONEEOF
     # 构建在新 tab 中执行的脚本
     local started_marker="${log_dir}/${phase_name}.started"
     local run_script="${log_dir}/${phase_name}.run.sh"
+    local phase_started_epoch
+    phase_started_epoch="$(date +%s)"
     # 捕获当前环境中 claude 需要的认证和配置变量
     local env_exports=""
     for var in ANTHROPIC_AUTH_TOKEN ANTHROPIC_API_KEY ANTHROPIC_BEDROCK_BASE_URL \
                ANTHROPIC_MODEL ANTHROPIC_SMALL_FAST_MODEL \
                CLAUDE_CODE_USE_BEDROCK CLAUDE_CODE_SKIP_BEDROCK_AUTH CLAUDE_CODE_USE_VERTEX \
+               OPENAI_API_KEY CODEX_HOME \
                AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_REGION \
                HOME; do
         if [[ -n "${!var:-}" ]]; then
@@ -471,21 +458,56 @@ cd "$PROJECT_DIR"
 echo "\$\$" > "${started_marker}"
 echo -e "\033[1;36m════════════════════════════════════════\033[0m"
 echo -e "\033[1;36m  Session: ${session_name}\033[0m"
+echo -e "\033[1;36m  Provider:${PROVIDER}\033[0m"
 echo -e "\033[1;36m  Model:   ${phase_model}\033[0m"
 echo -e "\033[1;36m  Project: ${PROJECT_DIR}\033[0m"
 echo -e "\033[1;36m════════════════════════════════════════\033[0m"
 echo ""
-# claude 在前台运行，保持完整的 tty 连接
+# agent 在前台运行，保持完整的 tty 连接
 # 用户确认后 agent 写 .done，编排器检测到即推进下一阶段
-# claude session 保持运行，用户可继续交流
-claude \\
-    --model "$phase_model" \\
-    --name "$session_name" \\
-    --add-dir "$PROJECT_DIR" \\
-    --permission-mode default \\
-    --verbose \\
-    ${resume_session:+--resume "$resume_session"} \\
-    -- "\$(cat '${prompt_file}')"
+if [[ "${PROVIDER}" == "claude" ]]; then
+    if [[ -n "${resume_session_id}" ]]; then
+        claude \\
+            --model "$phase_model" \\
+            --session-id "${resume_session_id}" \\
+            --add-dir "$PROJECT_DIR" \\
+            --permission-mode default \\
+            --verbose \\
+            -- "\$(cat '${prompt_file}')"
+    elif [[ -n "${resume_session_name}" ]]; then
+        claude \\
+            --model "$phase_model" \\
+            --add-dir "$PROJECT_DIR" \\
+            --permission-mode default \\
+            --verbose \\
+            --resume "${resume_session_name}" \\
+            -- "\$(cat '${prompt_file}')"
+    else
+        claude \\
+            --model "$phase_model" \\
+            --name "$session_name" \\
+            --add-dir "$PROJECT_DIR" \\
+            --permission-mode default \\
+            --verbose \\
+            -- "\$(cat '${prompt_file}')"
+    fi
+elif [[ "${PROVIDER}" == "codex" ]]; then
+    if [[ -n "${resume_session_id}" ]]; then
+        codex resume \\
+            -m "$phase_model" \\
+            -C "$PROJECT_DIR" \\
+            "${resume_session_id}" \\
+            "\$(cat '${prompt_file}')"
+    else
+        codex \\
+            -m "$phase_model" \\
+            -C "$PROJECT_DIR" \\
+            "\$(cat '${prompt_file}')"
+    fi
+else
+    echo "Unsupported provider: ${PROVIDER}" >&2
+    exit 2
+fi
 EXIT_CODE=\$?
 
 # 如果 agent 没有写 .done（比如用户手动退出 claude），由脚本兜底写入
@@ -495,9 +517,35 @@ fi
 RUNEOF
     chmod +x "$run_script"
 
+    state_cmd phase-start \
+        --file "$STATE_FILE" \
+        --phase "$phase_name" \
+        --provider "$PROVIDER" \
+        --model "$phase_model" \
+        --session-name "$session_name" \
+        --output-file "$output_file" \
+        --prompt-file "$prompt_file" \
+        --run-script "$run_script" \
+        --started-epoch "$phase_started_epoch"
+
     # 在当前 Ghostty 窗口中打开新 tab 执行脚本
     rm -f "$started_marker"
-    open_ghostty_tab "$run_script" "$PROJECT_DIR" "$started_marker"
+    "$BIN_DIR/ghostty-open-tab" --script "$run_script" --cwd "$PROJECT_DIR" --verify-file "$started_marker"
+
+    if [[ -z "$resume_phase" ]]; then
+        local discovered_session_id
+        discovered_session_id="$("$BIN_DIR/find-agent-session" \
+            --provider "$PROVIDER" \
+            --project-dir "$PROJECT_DIR" \
+            --session-name "$session_name" \
+            --started-epoch "$phase_started_epoch" 2>/dev/null || true)"
+        if [[ -n "$discovered_session_id" ]]; then
+            state_cmd set-session-id --file "$STATE_FILE" --phase "$phase_name" --session-id "$discovered_session_id"
+            log_info "记录 session_id: $phase_name → $discovered_session_id"
+        else
+            log_warn "未能发现 $phase_name 的 session_id，后续精确续接可能不可用"
+        fi
+    fi
 
     # 等待该阶段完成（轮询 .done 标记文件）
     log_info "等待 session 完成..."
@@ -508,6 +556,17 @@ RUNEOF
     local exit_code
     exit_code=$(cat "${log_dir}/${phase_name}.done")
     rm -f "${log_dir}/${phase_name}.done" "${prompt_file}"
+
+    local phase_status="done"
+    if [[ "$exit_code" != "0" ]]; then
+        phase_status="failed"
+    fi
+    state_cmd phase-finish \
+        --file "$STATE_FILE" \
+        --phase "$phase_name" \
+        --status "$phase_status" \
+        --exit-code "$exit_code" \
+        --output-file "$output_file"
 
     if [[ -f "$output_file" ]]; then
         log_success "$phase_name 完成 → $output_file"
@@ -523,6 +582,12 @@ should_skip_phase() {
     local output_file="$2"
     if [[ "$RESUME_MODE" == true && -f "$output_file" ]]; then
         log_info "跳过 ${phase_name}（已有产出: $(basename "$output_file")）"
+        state_cmd phase-finish \
+            --file "$STATE_FILE" \
+            --phase "$phase_name" \
+            --status "skipped" \
+            --exit-code "0" \
+            --output-file "$output_file"
         return 0
     fi
     return 1
@@ -542,25 +607,13 @@ if [[ "$PHASE_EXPLORE" == true ]] && ! should_skip_phase "explore" "$DIR_EXPLORE
     fi
 
     run_phase "explore" "explore" \
-        "你是一个技术探索者。${EXPLORE_INPUT}
+        "调用 /explore skill。
 
-在 $PROJECT_DIR 项目代码中进行探索。
-
-你的任务：
-1. 搜索与这个方向相关的现有代码、组件、数据模型
-2. 找出可复用的能力
-3. 识别技术约束
-4. 评估可行性，给出推荐的实现路径
-
-将探索报告写入 $DIR_EXPLORE/exploration.md，格式包含：
-- 可复用的组件（给出文件路径）
-- 相关数据模型
-- 相关接口
-- 技术约束
-- 可行性评估
-- 推荐实现路径
-
-如果探索过程中发现需求可以被细化，也将细化后的需求描述写入 $WORKSPACE_DIR/requirement.md" \
+上下文参数：
+- 探索输入：${EXPLORE_INPUT}
+- 项目路径：$PROJECT_DIR
+- 报告输出路径：$DIR_EXPLORE/exploration.md
+- 如果探索过程中发现需求可以被细化，也将细化后的需求描述写入 $WORKSPACE_DIR/requirement.md" \
         "$DIR_EXPLORE/exploration.md" "$DIR_EXPLORE"
 
     if [[ "$BP_AFTER_EXPLORE" == true ]]; then
@@ -579,27 +632,18 @@ if [[ "$PHASE_DESIGN" == true ]] && ! should_skip_phase "design" "$DIR_DESIGN/pl
     fi
 
     run_phase "design" "design" \
-        "你是一个资深的技术方案设计者。阅读 $WORKSPACE_DIR/requirement.md 中的需求。${DESIGN_CONTEXT}
+        "调用 /design skill。
 
-然后探索 $PROJECT_DIR 项目代码，设计技术方案。
+上下文参数：
+- 需求路径：$WORKSPACE_DIR/requirement.md
+- 项目路径：$PROJECT_DIR
+- 方案输出路径：$DIR_DESIGN/plan.md
+- 补充上下文：${DESIGN_CONTEXT}
 
-重要原则 — 生产行为保护：
-- 对每个改动项，必须明确区分「行为变更」（改变运行时输入/输出/wire format/外部调用的语义）和「结构优化」（不改变运行时行为的重构/缓存/容错）
-- 对生产在跑的关键路径（外部 API 调用、数据持久化、消息序列化/反序列化），默认保留现有行为，除非有明确且充分的理由变更
-- 如果某个改动涉及序列化库切换、数据格式变更、协议变更等行为变更，必须逐字段验证兼容性，并在风险章节显式标注
-
-方案必须包含以下章节（缺一不可）：
-1. 方案概述
-2. 复用分析 — 列出复用的现有组件（给出文件路径和理由）
-3. 数据模型 — 新增/修改的表结构和索引
-4. 接口设计 — API/RPC 接口定义
-5. 核心流程 — 关键业务流程步骤和调用链路（每个改动项须标注「行为变更」或「结构优化」）
-6. 性能评估 — 数据量级、QPS 预估、IO 次数、是否需要缓存/异步
-7. 可观测性方案 — 日志记录点、监控指标、告警规则
-8. 风险和待确认项 — 如有分批实施，标注每个批次依赖哪些阻塞项，哪些可并行
-9. 实施评估 — 改动文件清单及预估行数、各项相对工作量（标注哪项最重）、涉及修改的核心文件的测试现状（有/无测试）、总工时预估、批次依赖矩阵
-
-将方案写入 $DIR_DESIGN/plan.md" \
+额外约束：
+- 对每个改动项，必须明确区分「行为变更」和「结构优化」
+- 对生产在跑的关键路径，默认保留现有行为，除非有明确且充分的理由变更
+- 如果涉及序列化库切换、数据格式变更、协议变更等行为变更，必须逐字段验证兼容性，并在风险章节显式标注" \
         "$DIR_DESIGN/plan.md" "$DIR_DESIGN"
 
     if [[ "$BP_AFTER_DESIGN" == true ]]; then
@@ -631,30 +675,17 @@ if [[ "$PHASE_REVIEW_PLAN" == true && "$REVIEW_ALREADY_PASSED" == false ]]; then
         fi
 
         run_phase "review-plan-r${REVIEW_ROUND}" "review-plan" \
-            "你是一个严格的技术方案评审者（Critic Agent）。你的任务是独立评审技术方案。
+            "调用 /review-plan skill。
 
-阅读 $DIR_DESIGN/plan.md 中的技术方案。
-${REVIEW_CONTEXT}
+上下文参数：
+- 方案路径：$DIR_DESIGN/plan.md
+- 项目路径：$PROJECT_DIR
+- 报告输出路径：$DIR_REVIEW/review-r${REVIEW_ROUND}.md
+- 评审上下文：${REVIEW_CONTEXT}
 
-重要：在评审前，你必须完整阅读方案中涉及的所有源代码文件：
-- 方案提到的每个要修改的文件，完整阅读（不只是搜关键词）
-- 这些文件的调用者和被调用者
-- 相关的接口定义、数据模型、配置
-- 如果方案声称「复用了 XXX」，去读那个 XXX 确认是否真的可以复用
-只有读完代码后，你才能判断方案是否靠谱。
-
-按以下 Checklist 逐项检查：
-1. 复用性 — 现有系统有无类似实现？为什么不复用？
-2. 数据量级 — 涉及的表实际数据量，增长趋势
-3. DB/Redis/MQ 性能影响 — 新增查询/写入的压力评估
-4. 调用链路瓶颈 — 关键路径性能分析
-5. 行为变更安全性 — 方案中标注为「行为变更」的改动，是否逐字段验证了兼容性？序列化/反序列化/wire format 是否 before-after 等价？生产在跑的关键路径（外部 API、持久化、MQ）是否在没有充分理由时被不必要地变更了？如果方案没有区分行为变更和结构优化，这本身就是一个问题
-6. 可观测性 — 日志规范、监控指标、告警覆盖是否完整
-7. 实施可行性 — 涉及修改的核心文件是否有现有测试（用 Glob 搜索）？工作量评估是否存在？各项工作量分布是否均匀？批次与阻塞项的依赖关系是否明确？
-
-重要：你不知道方案是怎么设计出来的，只看方案文档和项目代码。发现问题就指出，不要迁就。
-
-将评审报告写入 $DIR_REVIEW/review-r${REVIEW_ROUND}.md，格式：每个 checklist 项给出 结论/发现/建议。
+额外关注：
+- 方案中标注为「行为变更」的改动，必须逐字段验证兼容性
+- 如果方案没有区分行为变更和结构优化，这本身就是一个问题
 
 最后必须给出一行总体裁决（这一行会被自动解析，格式必须严格）：
 - 如果所有项都通过：VERDICT: PASS
@@ -684,7 +715,6 @@ ${REVIEW_CONTEXT}
         fi
 
         # revise 续接 design session（同一个 agent 修正自己的方案）
-        DESIGN_SESSION_NAME="${TASK_NAME}-design"
         run_phase "revise-r${REVIEW_ROUND}" "revise" \
             "评审报告已出，请根据评审反馈修正你的技术方案。
 
@@ -710,7 +740,7 @@ ${REVISE_CONTEXT}
 - 未采纳的评审意见及理由
 - 新增的风险项" \
             "$DIR_REVIEW/revise-notes-r${REVIEW_ROUND}.md" "$DIR_REVIEW" \
-            "$DESIGN_SESSION_NAME"
+            "design"
 
         # 保持 plan.md 始终指向最新版
         cp "$DIR_DESIGN/plan-r${REVIEW_ROUND}.md" "$DIR_DESIGN/plan.md" 2>/dev/null || true
@@ -733,32 +763,13 @@ if [[ "$PHASE_IMPLEMENT" == true ]] && ! should_skip_phase "implement" "$DIR_IMP
     fi
 
     run_phase "implement" "implement" \
-        "你是一个严格遵循 TDD 的实现者。阅读 $DIR_DESIGN/plan.md 中的技术方案。${IMPL_CONTEXT}
+        "调用 /implement skill。
 
-重要：在开始实现前，你必须先阅读方案中「实现指引」章节列出的所有文件，深入理解每个文件的职责、调用关系和现有模式。不要跳过这一步。
-
-在 $PROJECT_DIR 项目中按 TDD 流程实现：
-1. 先写测试（Red）— 定义期望行为
-2. 写实现（Green）— 最少代码让测试通过
-3. 重构（Refactor）— 保持测试绿色
-
-编码时必须遵守以下规范（高频规则摘要）：
-- 命名：类名 UpperCamelCase，方法/变量 lowerCamelCase，常量全大写下划线，Boolean 字段不用 is 前缀
-- 禁止魔法值，equals 由常量调用或用 Objects.equals()，包装类比较用 equals
-- POJO 成员用包装类、不赋默认值、必须 toString()；循环拼接用 StringBuilder
-- 线程由线程池提供，禁止 Executors，ThreadLocal 必须 finally remove()
-- 不 catch 运行时异常（用前置检查），可关闭资源用 try-with-resources
-- 日志用 SLF4J + 占位符 {}，异常日志带上下文和栈
-- SQL 禁止 SELECT *，MyBatis 用 #{}，更新同步 gmt_modified，小数用 decimal
-- 用户输入必须校验，SQL 参数化防注入
-
-使用 /Users/hk00661ml/Documents/apache-maven-3.9.4/bin/mvn test 运行测试。
-
-实现完成后，将实现说明写入 $DIR_IMPLEMENT/impl-notes.md，包含：
-- 实现概要
-- 与方案的偏差说明（如有）
-- 测试覆盖情况
-- 已知局限" \
+上下文参数：
+- 方案路径：$DIR_DESIGN/plan.md
+- 项目路径：$PROJECT_DIR
+- 输出路径：$DIR_IMPLEMENT/impl-notes.md
+- 实现上下文：${IMPL_CONTEXT}" \
         "$DIR_IMPLEMENT/impl-notes.md" "$DIR_IMPLEMENT"
 
     if [[ "$BP_AFTER_IMPLEMENT" == true ]]; then
@@ -790,28 +801,13 @@ if [[ "$PHASE_REVIEW_CODE" == true && "$CODE_REVIEW_ALREADY_PASSED" == false ]];
         fi
 
         run_phase "review-code-r${CODE_REVIEW_ROUND}" "review-code" \
-            "你是一个严格的代码评审者（Critic Agent）。你的任务是独立评审实现代码。
+            "调用 /review-code skill（对照方案模式）。
 
-阅读 $DIR_DESIGN/plan.md 中的技术方案，然后在 $PROJECT_DIR 项目中查看最近的代码变更（git diff）。
-${CODE_REVIEW_CONTEXT}
-
-按以下 12 个维度逐项评审（基于 Alibaba Java 编码规范）：
-1. 方案符合度 — 是否忠实实现了方案？有无遗漏或多余？
-2. 命名与编码规范 — 类名/方法名/常量命名是否符合规范？Boolean 字段是否避免 is 前缀？是否有魔法值？
-3. OOP 与代码结构 — @Override、equals 安全调用、POJO 规范、方法声明顺序
-4. 集合使用 — hashCode/equals 重写、不可变集合误操作、foreach 中增删、Comparator 契约、初始化大小
-5. 并发与线程安全 — 线程池创建方式、ThreadLocal remove、锁粒度和顺序、SimpleDateFormat 线程安全
-6. 异常处理 — 不 catch 运行时异常、不吞异常、finally 不 return、try-with-resources
-7. 日志规范 — SLF4J 门面、占位符、异常日志包含上下文和栈
-8. 数据层规范 — 表结构/索引/SQL/ORM 规范，禁止 SELECT *，禁止 \${}，更新同步 gmt_modified
-9. 测试覆盖 — 核心逻辑、边界条件、运行测试确认通过
-10. 性能 — SQL EXPLAIN、N+1、循环内 IO、正则预编译
-11. 可观测性 — 日志、指标、告警是否落地
-12. 安全 — 鉴权、脱敏、SQL 注入、XSS、CSRF、输入校验
-
-使用 /Users/hk00661ml/Documents/apache-maven-3.9.4/bin/mvn test 运行测试验证。
-
-将评审报告写入 $DIR_REVIEW_CODE/code-review-r${CODE_REVIEW_ROUND}.md，每个维度给出结论和发现，最后区分必须修改的问题和建议改进。
+上下文参数：
+- 方案路径：$DIR_DESIGN/plan.md
+- 项目路径：$PROJECT_DIR
+- 报告输出路径：$DIR_REVIEW_CODE/code-review-r${CODE_REVIEW_ROUND}.md
+- 评审上下文：${CODE_REVIEW_CONTEXT}
 
 最后必须给出一行总体裁决（这一行会被自动解析，格式必须严格）：
 - 如果所有必须修改的问题都已解决或无必须修改项：VERDICT: PASS
@@ -841,7 +837,6 @@ ${CODE_REVIEW_CONTEXT}
         fi
 
         # fix 续接 implement session（同一个 agent 修复自己的代码）
-        IMPLEMENT_SESSION_NAME="${TASK_NAME}-implement"
         run_phase "fix-r${CODE_REVIEW_ROUND}" "fix" \
             "代码评审报告已出，请根据评审反馈修复代码问题。
 
@@ -862,7 +857,7 @@ ${FIX_CONTEXT}
 - 未修复的问题及理由
 - 测试运行结果" \
             "$DIR_REVIEW_CODE/fix-notes-r${CODE_REVIEW_ROUND}.md" "$DIR_REVIEW_CODE" \
-            "$IMPLEMENT_SESSION_NAME"
+            "implement"
 
         log_success "第${CODE_REVIEW_ROUND}轮代码修复完成，进入下一轮评审"
     done

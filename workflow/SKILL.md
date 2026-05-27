@@ -1,13 +1,13 @@
 ---
 name: workflow
-description: "多 Agent 编排器。根据用户的需求，在 Ghostty 新 tab 中启动独立 Claude session 执行各阶段（需求审视→设计→评审→修正→实现→代码评审），每个阶段完成后回到主对话确认再推进。"
+description: "多 Agent 编排器。根据用户的需求，在 Ghostty 新 tab 中启动独立 Claude Code 或 Codex agent session 执行各阶段（需求审视→设计→评审→修正→实现→代码评审），每个阶段完成后回到主对话确认再推进。"
 argument-hint: "[需求描述或飞书链接]"
 allowed-tools: ["Read", "Write", "Bash", "AskUserQuestion", "Skill", "Glob", "Grep", "Agent"]
 ---
 
 # Workflow — 多 Agent 编排器
 
-你是编排器。你在 Claude Code 主对话中运行，通过 Ghostty 新 tab 启动独立 Claude session 执行各阶段任务。
+你是编排器。你在 Claude Code 或 Codex 主对话中运行，通过 Ghostty 新 tab 启动独立 agent session 执行各阶段任务。
 
 ## 核心流程
 
@@ -106,7 +106,8 @@ allowed-tools: ["Read", "Write", "Bash", "AskUserQuestion", "Skill", "Glob", "Gr
 - **需求名称** — 提取一个简短名称（如"卡对账"、"EU区域对接"）
 - **需求来源** — 飞书链接、本地文件、口述
 - **要跑哪些阶段** — 默认全流程，可跳过部分
-- **模型** — 默认 claude-sonnet-4-6，复杂需求建议 opus
+- **Provider** — `claude` 或 `codex`。优先使用用户指定值；未指定时可交给 `orchestrate.sh` 自动推断
+- **模型** — Claude 默认 claude-sonnet-4-6；Codex 默认读取 `~/.codex/config.toml`，读不到时使用 gpt-5.5；复杂需求可按 provider 选择更强模型
 
 ### 0.2 获取需求文档
 
@@ -121,9 +122,10 @@ allowed-tools: ["Read", "Write", "Bash", "AskUserQuestion", "Skill", "Glob", "Gr
 用 AskUserQuestion 确认：
 
 1. **阶段范围** — 全流程 / 只出方案+评审 / 跳过代码评审
-2. **模型** — Sonnet（默认）/ Opus
-3. **是否需要需求审视** — 默认开启。需求来源是飞书 PRD 或口述时建议开启；需求已经过充分讨论且边界清晰时可跳过
-4. **是否需要探索阶段** — 仅当需求文档中代码定位不够明确时
+2. **Provider** — Claude Code / Codex（默认按当前上下文推断）
+3. **模型** — 按 provider 选择。Claude Code 可选 Sonnet（默认）/ Opus；Codex 可选本机默认模型（读取 `~/.codex/config.toml`）/ 指定模型（如 `gpt-5.5`）
+4. **是否需要需求审视** — 默认开启。需求来源是飞书 PRD 或口述时建议开启；需求已经过充分讨论且边界清晰时可跳过
+5. **是否需要探索阶段** — 仅当需求文档中代码定位不够明确时
 
 可根据上下文省略已明确的选项。
 
@@ -210,70 +212,41 @@ echo "0" > "<workspace>/<phase>/<phase>.done"
 
 ### Step 2: 生成 run script
 
-生成 `<workspace>/<phase>/<phase>.run.sh`，内容：
+生成 `<workspace>/<phase>/<phase>.run.sh`。run script 必须：
+
+- 切换到 `{project_dir}`
+- 写入 `<workspace>/<phase>/<phase>.started`
+- 输出 provider/model/project/session 信息
+- 根据 provider 启动 agent CLI
+- 如果 agent 退出但没有写 `.done`，用 exit code 兜底写 `.done`
+
+provider 命令规则：
 
 ```bash
-#!/bin/bash
-export NODE_TLS_REJECT_UNAUTHORIZED=0
-export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"
-swift -e 'import Carbon; let s = TISCreateInputSourceList([kTISPropertyInputSourceID: "com.apple.keylayout.ABC" as CFString] as CFDictionary, false)!.takeRetainedValue() as! [TISInputSource]; if let i = s.first { TISSelectInputSource(i) }' 2>/dev/null || true
-# 环境变量（从当前 Claude Code 环境继承）
-<env_exports>
-cd "<project_dir>"
-echo "$$" > "<workspace>/<phase>/<phase>.started"
-echo -e "\033[1;36m════════════════════════════════════════\033[0m"
-echo -e "\033[1;36m  Session: <session_name>\033[0m"
-echo -e "\033[1;36m  Model:   <model>\033[0m"
-echo -e "\033[1;36m  Project: <project_dir>\033[0m"
-echo -e "\033[1;36m════════════════════════════════════════\033[0m"
-echo ""
-claude \
-    --model "<model>" \
-    --name "<session_name>" \
-    --add-dir "<project_dir>" \
-    --permission-mode default \
-    --verbose \
-    -- "$(cat '<prompt_file>')"
-EXIT_CODE=$?
-if [[ ! -f "<done_marker>" ]]; then
-    echo "$EXIT_CODE" > "<done_marker>"
-fi
+# Claude Code 新 session
+claude --model "<model>" --name "<session_name>" --add-dir "<project_dir>" --permission-mode default --verbose -- "$(cat '<prompt_file>')"
+
+# Claude Code 精确续接
+claude --model "<model>" --session-id "<session_id>" --add-dir "<project_dir>" --permission-mode default --verbose -- "$(cat '<prompt_file>')"
+
+# Codex 新 session
+codex -m "<model>" -C "<project_dir>" "$(cat '<prompt_file>')"
+
+# Codex 精确续接
+codex resume -m "<model>" -C "<project_dir>" "<session_id>" "$(cat '<prompt_file>')"
 ```
 
-需要传递的环境变量列表：
-- ANTHROPIC_AUTH_TOKEN, ANTHROPIC_API_KEY, ANTHROPIC_BEDROCK_BASE_URL
-- ANTHROPIC_MODEL, ANTHROPIC_SMALL_FAST_MODEL
-- CLAUDE_CODE_USE_BEDROCK, CLAUDE_CODE_SKIP_BEDROCK_AUTH, CLAUDE_CODE_USE_VERTEX
-- AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN, AWS_REGION
-- HOME
-
-用 Bash 工具执行以下命令获取环境变量值并生成 export 语句（注意：Claude Code 的 shell 是 zsh，用 `printenv` 而不是 `${!var}`）：
-
-```bash
-for var in ANTHROPIC_AUTH_TOKEN ANTHROPIC_API_KEY ANTHROPIC_BEDROCK_BASE_URL ANTHROPIC_MODEL ANTHROPIC_SMALL_FAST_MODEL CLAUDE_CODE_USE_BEDROCK CLAUDE_CODE_SKIP_BEDROCK_AUTH CLAUDE_CODE_USE_VERTEX AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_REGION HOME; do val=$(printenv "$var" 2>/dev/null); if [[ -n "$val" ]]; then echo "export ${var}='${val}'"; fi; done
-```
-
-将输出的 export 语句插入 run script。
+需要传递的环境变量按 provider 最小化处理。Claude/Bedrock 相关变量、OpenAI/Codex 相关变量、AWS 变量和 `HOME` 可按需注入 run script。
 
 ### Step 3: 开 Ghostty tab
 
-用 Bash 工具执行 AppleScript：
+不要在 skill 中重新实现 AppleScript。调用仓库共享脚本：
 
 ```bash
-osascript -e '
-tell application "Ghostty"
-    set cfg to new surface configuration
-    set initial working directory of cfg to "<project_dir>"
-    set command of cfg to "bash <run_script_path>"
-    set wait after command of cfg to true
-    set environment variables of cfg to {"NODE_TLS_REJECT_UNAUTHORIZED=0"}
-    new tab in window id "<window_id>" with configuration cfg
-end tell'
+bin/ghostty-open-tab --script "<run_script_path>" --cwd "<project_dir>" --verify-file "<started_marker>"
 ```
 
-**窗口 ID 获取**：第一次启动阶段前，用 AppleScript 获取当前 Ghostty 窗口列表。如果只有一个窗口，直接用。否则用标题标记法定位。
-
-如果无法获取窗口 ID，fallback 到 `new window`。
+该脚本负责定位当前 Ghostty 窗口、开新 tab 或 fallback 到新窗口，并用 started marker 验证启动成功。
 
 ### Step 4: 后台轮询等待
 
@@ -379,7 +352,7 @@ review_context：第 2 轮起加 "这是第N轮评审。上一轮评审报告在
 
 ### Phase 3.5: Revise
 
-revise 使用 `--resume "<需求名>-design"` 续接 design session。
+revise 从 `workflow-state.json` 读取 design 阶段的 `session_id`，按 provider 精确续接 design session。
 
 ```
 评审报告已出，请根据评审反馈修正你的技术方案。
@@ -429,7 +402,7 @@ revise 使用 `--resume "<需求名>-design"` 续接 design session。
 
 **编排器在 revise 完成后**：`cp plan-rN.md plan.md`（保持 plan.md 始终指向最新版）
 
-run script 中 claude 命令加 `--resume "<需求名>-design"` 续接 design session。
+run script 按 provider 使用精确续接：Claude Code 使用 `--session-id <session_id>`，Codex 使用 `codex resume <session_id>`。
 
 ### Phase 4: Implement
 
@@ -470,7 +443,7 @@ review_code_context：第 2 轮起加 "这是第N轮代码评审。上一轮评�
 
 ### Phase 5.5: Fix
 
-fix 使用 `--resume "<需求名>-implement"` 续接 implement session。
+fix 从 `workflow-state.json` 读取 implement 阶段的 `session_id`，按 provider 精确续接 implement session。
 
 ```
 代码评审报告已出，请根据评审反馈修复代码问题。
@@ -502,7 +475,7 @@ fix 使用 `--resume "<需求名>-implement"` 续接 implement session。
 
 fix_context：第 2 轮起加 "这是第N轮修复。上一轮修复说明在 {dir_review_code}/fix-notes-r{N-1}.md。"
 
-run script 中 claude 命令加 `--resume "<需求名>-implement"` 续接 implement session。
+run script 按 provider 使用精确续接：Claude Code 使用 `--session-id <session_id>`，Codex 使用 `codex resume <session_id>`。
 
 ### Phase 5.2: Verify Observability
 
@@ -563,7 +536,7 @@ verify_obs_deploy_context：如果用户提供了部署环境信息，加 "代�
 ## 注意事项
 
 - **环境变量**：Ghostty `command` 模式不继承 shell 环境，必须在 run script 中显式 export
-- **session 不自动退出**：agent 完成后 claude session 保持运行，用户可继续交流
+- **session 不自动退出**：agent 完成后 session 保持运行，用户可继续交流
 - **Ghostty 必须**：此编排器依赖 Ghostty 1.3.0+ AppleScript API，其他终端不支持
-- **CLAUDE.md 检查**：启动前检查项目目录有无 CLAUDE.md，没有则警告
+- **项目约束检查**：启动前检查项目目录有无 `CLAUDE.md`/`AGENTS.md` 等 agent 指南，没有则警告
 - **TRD 生成**：全流程完成后，提醒用户可用 `/write-trd` 将 plan.md 转为 TRD 文档

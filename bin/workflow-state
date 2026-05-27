@@ -1,0 +1,168 @@
+#!/usr/bin/env python3
+import argparse
+import json
+import os
+import sys
+import tempfile
+from datetime import datetime, timezone
+
+
+def now_iso():
+    return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+
+
+def load_state(path):
+    if not os.path.exists(path):
+        return {"phases": {}}
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def save_state(path, state):
+    directory = os.path.dirname(os.path.abspath(path))
+    os.makedirs(directory, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(prefix=".workflow-state.", suffix=".tmp", dir=directory)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(state, f, ensure_ascii=False, indent=2)
+            f.write("\n")
+        os.replace(tmp_path, path)
+    finally:
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+
+
+def get_phase(state, phase):
+    return state.setdefault("phases", {}).setdefault(phase, {})
+
+
+def cmd_init(args):
+    state = load_state(args.file)
+    state.update({
+        "task_name": args.task_name,
+        "provider": args.provider,
+        "model": args.model,
+        "project_dir": args.project_dir,
+        "workspace_dir": args.workspace_dir,
+        "updated_at": now_iso(),
+    })
+    state.setdefault("workflow_id", args.workflow_id)
+    state.setdefault("created_at", now_iso())
+    state.setdefault("phases", {})
+    save_state(args.file, state)
+
+
+def cmd_phase_start(args):
+    state = load_state(args.file)
+    phase = get_phase(state, args.phase)
+    phase.update({
+        "status": "running",
+        "provider": args.provider,
+        "model": args.model,
+        "session_name": args.session_name,
+        "output_file": args.output_file,
+        "prompt_file": args.prompt_file,
+        "run_script": args.run_script,
+        "started_at": now_iso(),
+        "started_epoch": args.started_epoch,
+    })
+    state["updated_at"] = now_iso()
+    save_state(args.file, state)
+
+
+def cmd_phase_finish(args):
+    state = load_state(args.file)
+    phase = get_phase(state, args.phase)
+    phase.update({
+        "status": args.status,
+        "exit_code": args.exit_code,
+        "ended_at": now_iso(),
+    })
+    if args.output_file:
+        phase["output_file"] = args.output_file
+    state["updated_at"] = now_iso()
+    save_state(args.file, state)
+
+
+def cmd_set_session_id(args):
+    state = load_state(args.file)
+    phase = get_phase(state, args.phase)
+    phase["session_id"] = args.session_id
+    state["updated_at"] = now_iso()
+    save_state(args.file, state)
+
+
+def cmd_get(args, key):
+    state = load_state(args.file)
+    phase = state.get("phases", {}).get(args.phase, {})
+    value = phase.get(key, "")
+    if value is None:
+        value = ""
+    print(value)
+
+
+def build_parser():
+    parser = argparse.ArgumentParser(description="Read and update j-workflow state JSON.")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    p = sub.add_parser("init")
+    p.add_argument("--file", required=True)
+    p.add_argument("--workflow-id", required=True)
+    p.add_argument("--task-name", required=True)
+    p.add_argument("--provider", required=True)
+    p.add_argument("--model", required=True)
+    p.add_argument("--project-dir", required=True)
+    p.add_argument("--workspace-dir", required=True)
+    p.set_defaults(func=cmd_init)
+
+    p = sub.add_parser("phase-start")
+    p.add_argument("--file", required=True)
+    p.add_argument("--phase", required=True)
+    p.add_argument("--provider", required=True)
+    p.add_argument("--model", required=True)
+    p.add_argument("--session-name", required=True)
+    p.add_argument("--output-file", required=True)
+    p.add_argument("--prompt-file", required=True)
+    p.add_argument("--run-script", required=True)
+    p.add_argument("--started-epoch", required=True)
+    p.set_defaults(func=cmd_phase_start)
+
+    p = sub.add_parser("phase-finish")
+    p.add_argument("--file", required=True)
+    p.add_argument("--phase", required=True)
+    p.add_argument("--status", required=True, choices=["done", "failed", "skipped"])
+    p.add_argument("--exit-code", required=True)
+    p.add_argument("--output-file")
+    p.set_defaults(func=cmd_phase_finish)
+
+    p = sub.add_parser("set-session-id")
+    p.add_argument("--file", required=True)
+    p.add_argument("--phase", required=True)
+    p.add_argument("--session-id", required=True)
+    p.set_defaults(func=cmd_set_session_id)
+
+    p = sub.add_parser("get-session-id")
+    p.add_argument("--file", required=True)
+    p.add_argument("--phase", required=True)
+    p.set_defaults(func=lambda args: cmd_get(args, "session_id"))
+
+    p = sub.add_parser("get-phase-status")
+    p.add_argument("--file", required=True)
+    p.add_argument("--phase", required=True)
+    p.set_defaults(func=lambda args: cmd_get(args, "status"))
+
+    return parser
+
+
+def main():
+    args = build_parser().parse_args()
+    try:
+        args.func(args)
+    except Exception as exc:
+        print(f"[ERROR] workflow-state: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

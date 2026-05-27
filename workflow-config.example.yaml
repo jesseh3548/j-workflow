@@ -9,8 +9,15 @@ project_dir: ~/code/your-project
 # 工作区目录（可选，默认 <project_dir>/.workflow）
 # workspace_dir: ./.workflow
 
-# Claude 模型（可选）
+# Agent provider（可选，默认自动推断；支持 claude 或 codex）
+# provider: claude
+
+# Agent 模型（可选，需与 provider 匹配）
+# Claude Code 示例：
 # model: claude-sonnet-4-6
+# Codex 示例：
+# provider: codex
+# model: gpt-5.5
 
 # ── 阶段开关 ──
 # true = 启用, false = 跳过

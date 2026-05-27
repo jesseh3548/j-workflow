@@ -78,7 +78,7 @@ git fetch origin merge-requests/<MR_ID>/head:mr-<MR_ID> && git diff main...mr-<M
 | 15. 安全 | `rules/security.md` | 涉及用户输入/鉴权/数据展示时 |
 | 16. 工程规范 | `rules/engineering.md` | 涉及分层/依赖/模块结构时 |
 
-规则文件路径相对于此 skill 所在目录：`~/.claude/skills/review-code/rules/`
+规则文件路径相对于此 skill 所在目录：`rules/`
 
 **重要**：不要一次性加载所有规则文件。先看 diff，判断涉及哪些维度，只读相关的。对于明显不涉及的维度（如无并发代码则跳过 concurrency.md），直接在报告中标注"不涉及"。
 

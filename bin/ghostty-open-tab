@@ -1,0 +1,116 @@
+#!/bin/bash
+set -euo pipefail
+
+usage() {
+    cat <<'EOF'
+Usage: ghostty-open-tab --script <path> --cwd <dir> [--verify-file <path>]
+
+Open a Ghostty tab or window and run the provided script.
+EOF
+}
+
+SCRIPT_PATH=""
+WORKING_DIR=""
+VERIFY_FILE=""
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --script) SCRIPT_PATH="$2"; shift 2 ;;
+        --cwd) WORKING_DIR="$2"; shift 2 ;;
+        --verify-file) VERIFY_FILE="$2"; shift 2 ;;
+        -h|--help) usage; exit 0 ;;
+        *) echo "[ERROR] unknown argument: $1" >&2; usage; exit 1 ;;
+    esac
+done
+
+if [[ -z "$SCRIPT_PATH" || -z "$WORKING_DIR" ]]; then
+    usage >&2
+    exit 1
+fi
+
+if [[ ! -f "$SCRIPT_PATH" ]]; then
+    echo "[ERROR] script does not exist: $SCRIPT_PATH" >&2
+    exit 1
+fi
+
+GHOSTTY_WINDOW_ID=""
+
+detect_window() {
+    local marker="orchestrator-$$-$(date +%s)"
+    printf '\033]2;%s\007' "$marker"
+    sleep 0.3
+
+    GHOSTTY_WINDOW_ID=$(osascript -e "
+        tell application \"Ghostty\"
+            repeat with w in windows
+                repeat with t in tabs of w
+                    if name of t contains \"$marker\" then
+                        return id of w
+                    end if
+                end repeat
+            end repeat
+            return \"not_found\"
+        end tell
+    " 2>/dev/null || echo "not_found")
+
+    if [[ "$GHOSTTY_WINDOW_ID" == "not_found" ]]; then
+        GHOSTTY_WINDOW_ID=""
+    fi
+}
+
+open_surface() {
+    if [[ -n "$GHOSTTY_WINDOW_ID" ]]; then
+        osascript -e "
+            tell application \"Ghostty\"
+                set cfg to new surface configuration
+                set initial working directory of cfg to \"$WORKING_DIR\"
+                set command of cfg to \"bash $SCRIPT_PATH\"
+                set wait after command of cfg to true
+                set environment variables of cfg to {\"NODE_TLS_REJECT_UNAUTHORIZED=0\"}
+                set win to window id \"$GHOSTTY_WINDOW_ID\"
+                new tab in win with configuration cfg
+            end tell
+        " 2>/dev/null
+    else
+        osascript -e "
+            tell application \"Ghostty\"
+                set cfg to new surface configuration
+                set initial working directory of cfg to \"$WORKING_DIR\"
+                set command of cfg to \"bash $SCRIPT_PATH\"
+                set wait after command of cfg to true
+                set environment variables of cfg to {\"NODE_TLS_REJECT_UNAUTHORIZED=0\"}
+                new window with configuration cfg
+            end tell
+        " 2>/dev/null
+    fi
+}
+
+detect_window
+
+max_retries=3
+attempt=0
+while [[ $attempt -lt $max_retries ]]; do
+    attempt=$((attempt + 1))
+    open_surface
+
+    if [[ -z "$VERIFY_FILE" ]]; then
+        exit 0
+    fi
+
+    waited=0
+    while [[ $waited -lt 15 ]]; do
+        if [[ -f "$VERIFY_FILE" ]]; then
+            exit 0
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
+
+    if [[ $attempt -lt $max_retries ]]; then
+        echo "[WARN] tab launch verification failed; retrying ($attempt/$max_retries)" >&2
+        sleep "$attempt"
+    fi
+done
+
+echo "[ERROR] failed to open Ghostty tab after $max_retries attempts" >&2
+exit 1

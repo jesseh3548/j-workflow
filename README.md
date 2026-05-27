@@ -1,6 +1,8 @@
-# Multi-Agent Development Orchestrator
+# j-workflow
 
-多 Agent 协同开发编排器。通过独立 Claude session 做阶段隔离和交叉验证，降低单 agent 的上下文漂移和自检盲区。
+Multi-Agent Development Orchestrator for Claude Code and Codex.
+
+多 Agent 协同开发编排器。通过独立 agent session 做阶段隔离和交叉验证，降低单 agent 的上下文漂移和自检盲区。
 
 ## Contents
 
@@ -11,15 +13,18 @@
 - [Phase Output Contract](#phase-output-contract)
 - [Built-in Skills](#built-in-skills)
 - [Config Example](#config-example)
+- [Claude Code and Codex Support](#claude-code-and-codex-support)
 - [Changelog and Backlog](#changelog-and-backlog)
 
 ## Overview
 
-- Runtime: Claude Code + Ghostty (AppleScript tab API)
+- Runtime: Claude Code or Codex + Ghostty (AppleScript tab API)
 - Orchestrator entry: `workflow/SKILL.md` and `orchestrate.sh`
+- Shared utilities: `bin/ghostty-open-tab`, `bin/workflow-state`, `bin/find-agent-session`
 - Review loops:
   - `review-plan -> revise -> review-plan` until `VERDICT: PASS`
   - `review-code -> fix -> review-code` until `VERDICT: PASS`
+- Isolation requirement: each phase must run in an independent agent session. Do not fall back to running phase agents sequentially inside the same session.
 
 ## Workflow
 
@@ -47,7 +52,7 @@ Phase 5.5  fix                 -> review-code/fix-notes-rN.md
 ./orchestrate.sh --project ~/code/card-center --name "卡对账" --requirement ~/docs/req.md --auto
 ```
 
-Or use the workflow skill in Claude Code:
+Or use the workflow skill in a supported agent CLI:
 
 ```text
 /workflow 帮我做卡交易对账功能，需求文档在 ~/docs/req.md，项目是 card-center
@@ -100,6 +105,21 @@ Or use the workflow skill in Claude Code:
 ## Config Example
 
 See [`workflow-config.example.yaml`](./workflow-config.example.yaml).
+
+## Claude Code and Codex Support
+
+Provider support:
+
+- Use `--provider claude|codex` to select the agent CLI used for phase sessions.
+- Use `--model <model>` to select the model for either provider. Codex defaults to the model in `~/.codex/config.toml` when `--model` is omitted.
+- Support only Claude Code and Codex initially.
+- Keep Ghostty tab orchestration as the session isolation boundary.
+- Track phase status and session IDs in `workflow-state.json`.
+- Preserve native resume semantics for each provider: Claude Code uses session IDs, Codex uses `codex resume <session_id>`.
+- Avoid hard-coded Claude-only paths such as `~/.claude` in reusable skills.
+- Keep `orchestrate.sh` as a standalone hard-flow driver; `/workflow` can reuse the same shared scripts.
+- Keep phase skill frontmatter unchanged unless a provider requires a different skill manifest format.
+- Use environment context only for default inference. Explicit `--provider` must always take precedence.
 
 ## Changelog and Backlog
 

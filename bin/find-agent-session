@@ -1,0 +1,119 @@
+#!/usr/bin/env python3
+import argparse
+import glob
+import json
+import os
+import sys
+from datetime import datetime, timezone
+
+
+def parse_time(value):
+    if not value:
+        return 0.0
+    try:
+        if value.endswith("Z"):
+            value = value[:-1] + "+00:00"
+        return datetime.fromisoformat(value).timestamp()
+    except Exception:
+        return 0.0
+
+
+def iter_jsonl(path):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    yield json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+    except OSError:
+        return
+
+
+def codex_candidates(project_dir, started_epoch):
+    pattern = os.path.expanduser("~/.codex/sessions/**/*.jsonl")
+    for path in glob.glob(pattern, recursive=True):
+        for event in iter_jsonl(path):
+            if event.get("type") != "session_meta":
+                continue
+            payload = event.get("payload", {})
+            if os.path.abspath(payload.get("cwd", "")) != os.path.abspath(project_dir):
+                continue
+            ts = parse_time(payload.get("timestamp") or event.get("timestamp"))
+            if ts + 5 < started_epoch:
+                continue
+            session_id = payload.get("id")
+            if session_id:
+                yield ts, session_id, path
+            break
+
+
+def claude_candidates(project_dir, session_name, started_epoch):
+    patterns = [
+        "~/.claude/projects/**/*.jsonl",
+        "~/.claude/sessions/**/*.jsonl",
+        "~/.claude/**/*.jsonl",
+        "~/.claude/**/*.json",
+    ]
+    seen = set()
+    for pattern in patterns:
+        for path in glob.glob(os.path.expanduser(pattern), recursive=True):
+            if path in seen:
+                continue
+            seen.add(path)
+            for event in iter_jsonl(path):
+                payload = event.get("payload", event)
+                text = json.dumps(event, ensure_ascii=False)
+                if session_name and session_name not in text:
+                    continue
+                cwd = payload.get("cwd") or payload.get("project_dir") or payload.get("projectDir")
+                if cwd and os.path.abspath(cwd) != os.path.abspath(project_dir):
+                    continue
+                ts = parse_time(payload.get("timestamp") or event.get("timestamp") or payload.get("created_at"))
+                if ts and ts + 5 < started_epoch:
+                    continue
+                session_id = (
+                    payload.get("id")
+                    or payload.get("session_id")
+                    or payload.get("sessionId")
+                    or event.get("session_id")
+                    or event.get("sessionId")
+                )
+                if session_id:
+                    yield ts, session_id, path
+                    break
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Find a newly-started agent session id.")
+    parser.add_argument("--provider", required=True, choices=["claude", "codex"])
+    parser.add_argument("--project-dir", required=True)
+    parser.add_argument("--session-name", default="")
+    parser.add_argument("--started-epoch", required=True, type=float)
+    parser.add_argument("--timeout", type=int, default=30)
+    args = parser.parse_args()
+
+    import time
+
+    deadline = time.time() + args.timeout
+    while True:
+        if args.provider == "codex":
+            candidates = list(codex_candidates(args.project_dir, args.started_epoch))
+        else:
+            candidates = list(claude_candidates(args.project_dir, args.session_name, args.started_epoch))
+
+        if candidates:
+            candidates.sort(key=lambda item: item[0])
+            print(candidates[-1][1])
+            return 0
+
+        if time.time() >= deadline:
+            return 1
+        time.sleep(1)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
