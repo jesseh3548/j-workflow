@@ -5,6 +5,5 @@
 - [ ] 测试是否真的在验证行为（而不是实现细节）？
 - [ ] 测试是否能通过？运行确认
 
-```bash
-/Users/hk00661ml/Documents/apache-maven-3.9.4/bin/mvn test -pl <module> -Dtest=<TestClass>
-```
+- 根据项目实际构建工具运行相关测试；不要使用固定机器路径。
+- 如果项目没有测试或测试工具不可用，标注未运行原因和替代验证方式。

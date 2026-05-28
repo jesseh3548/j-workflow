@@ -850,7 +850,7 @@ ${FIX_CONTEXT}
 - 评审意见有误的：保留原实现，说明理由
 - 「建议改进」的问题：酌情采纳，不强制
 
-修复后运行测试确保通过：/Users/hk00661ml/Documents/apache-maven-3.9.4/bin/mvn test
+修复后运行与本次变更相关的测试确保通过；如果项目没有测试、测试工具不可用，或本次变更不适合自动化测试，请在修复说明中写明原因和替代验证方式。
 
 将修复说明写入 $DIR_REVIEW_CODE/fix-notes-r${CODE_REVIEW_ROUND}.md，包含：
 - 已修复的问题及修复内容

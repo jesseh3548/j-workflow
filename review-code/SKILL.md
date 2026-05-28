@@ -97,11 +97,7 @@ git fetch origin merge-requests/<MR_ID>/head:mr-<MR_ID> && git diff main...mr-<M
 
 ### Step 5: 运行测试
 
-```bash
-/Users/hk00661ml/Documents/apache-maven-3.9.4/bin/mvn test -pl <变更模块> -Dtest=<测试类1>,<测试类2>
-```
-
-先用 `git diff --name-only` 确定变更文件，再找对应的测试类。MR 模式下如果无法 checkout 代码则跳过，标注"未运行测试"。
+先用 `git diff --name-only` 确定变更文件，再根据项目实际构建工具运行相关测试。MR 模式下如果无法 checkout 代码则跳过，标注"未运行测试"；如果项目没有测试或工具不可用，说明原因和替代验证方式。
 
 ### Step 6: 输出评审报告
 

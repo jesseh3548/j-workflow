@@ -84,8 +84,8 @@ git diff --name-only --diff-filter=AM HEAD | grep -E '\.java$' | grep -v '/test/
 #    - 分支逻辑（if/else、switch）必须覆盖主要路径
 #    - 异常处理路径至少覆盖一个
 
-# 3. 运行测试并检查覆盖率（如项目有 jacoco）
-/Users/hk00661ml/Documents/apache-maven-3.9.4/bin/mvn test -pl <模块> jacoco:report
+# 3. 运行与变更相关的测试并检查覆盖率（如果项目支持覆盖率报告）
+<project test command> jacoco:report
 # 查看 target/site/jacoco/index.html 中变更类的覆盖率
 ```
 
@@ -339,4 +339,4 @@ void should_deduct_balance_when_payment_succeeds() {
 
 - **不要跳过测试直接写实现** — 即使"很简单"也要先写测试
 - **不要偏离方案** — 如果发现方案有问题，写入 impl-notes.md 说明，但不要自行改变方案
-- **使用 Maven 运行测试** — 只跑变更涉及的模块和测试类，不要全量跑：`/Users/hk00661ml/Documents/apache-maven-3.9.4/bin/mvn test -pl <变更模块> -Dtest=<测试类1>,<测试类2>`。先用 `grep -r "变更类名" */src/test/` 找到相关测试
+- **运行相关测试** — 根据项目的实际构建工具只跑变更涉及的模块和测试类，不要盲目全量跑。先用 `git diff --name-only` 和项目目录结构找到相关测试；如果没有测试或工具不可用，在 `impl-notes.md` 说明原因和替代验证方式。
