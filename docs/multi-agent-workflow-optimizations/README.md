@@ -300,6 +300,51 @@ orchestrate.sh --project ~/code/xxx --requirement req.md \
 
 **Fix**: 移到对应 skill 的 references/ 目录，agent 按需 Read。CLAUDE.md 从 ~200 行降到 ~35 行，每个 agent 省 ~2K tokens。
 
+### 29. 用 DDD 思路重构 Agent / Workflow 领域模型（中优）
+
+**Problem**: 现有设计主要围绕脚本流程和文件路径展开，agent、provider、session、phase、workflow state、产出物之间的边界还不够清晰。随着 Codex / Claude Code 多 provider、JSON 状态、动态 flow、重入、并行 worktree 等能力增加，继续按脚本变量堆叠会让语义分散，后续维护和扩展成本上升。
+
+**Fix**: 在进入更大规模重构前，用 DDD 思路重新审视核心领域模型，明确 bounded context、实体、值对象、聚合根和领域服务。
+
+**初步建模方向**：
+- Workflow Run：一次编排执行的聚合根，负责阶段推进、状态恢复、产物索引
+- Phase / Phase Attempt：阶段定义与某一轮执行实例分离，支持 review-rN、fix-rN、重试和重入
+- Agent Role：explore、design、review-plan、implement、review-code、fix 等角色，定义输入/输出契约
+- Provider：Claude Code / Codex 的能力适配层，负责启动、resume、model、环境变量和 session id 发现
+- Session：provider session 的领域对象，记录 session id、session name、resume 语义和归属 phase
+- Artifact：requirement、plan、review、impl-notes、code-review、fix-notes 等产出物，统一记录路径、版本和 latest alias
+- Execution Target：项目目录、worktree、关联项目、terminal/Ghostty tab 等执行上下文
+
+**需要回答的问题**：
+- `workflow-state.json` 应该是 Workflow Run 的持久化视图，还是事件日志 / 状态快照组合？
+- `workflow.json` 是流程定义的 DSL，还是 Agent Role 的配置集合？
+- provider 自动推断、显式选择和主 agent 传参应归属于哪个领域服务？
+- `orchestrate.sh` 和 `/workflow` skill 是否共享同一个领域模型和脚本 helper？
+- 重入、归档、并行 worktree 应该由 Workflow Run 管，还是由独立的 Workspace/Execution 服务管？
+
+**产出目标**：
+- 新增 `docs/domain-model.md` 或 ADR，记录领域对象、关系、状态机和关键不变量
+- 基于领域模型再拆分脚本 helper，避免 `orchestrate.sh` 和 `/workflow` skill 重复实现
+- 为后续 #20 声明式 flow JSON、#21 workflow-state.json、#24 并行 worktree、#26 重入质量修复提供统一设计基础
+
+### 30. design agent 引入 DDD 设计方法（中优）
+
+**Problem**: 当前 `/design` skill 更偏工程方案模板，重点覆盖复用分析、数据模型、接口、流程、性能和可观测性，但没有显式要求 agent 先做领域建模。对于业务复杂需求，design agent 容易直接按 CRUD、接口或表结构拆方案，忽略领域边界、聚合、不变量和领域服务职责。
+
+**Fix**: 后续调整 `/design` skill，让技术方案设计默认使用 DDD 思路，但不要求所有需求都过度建模。
+
+**设计要求方向**：
+- Step 1 理解需求时提取领域语言、业务动作、状态、规则和不变量
+- 在方案概述中增加领域建模摘要：bounded context、实体、值对象、聚合根、领域服务/应用服务、关键不变量
+- 数据模型章节说明表结构与领域模型的映射关系，以及聚合边界内的一致性策略
+- 核心流程章节按应用服务 / 领域服务 / 基础设施层说明职责边界
+- 对简单需求允许明确说明“不单独引入聚合/领域服务”的理由，避免为了 DDD 而 DDD
+
+**涉及改动**：
+- `design/SKILL.md` — 增加 DDD 建模步骤和 plan.md 输出要求
+- `review-plan/SKILL.md` — 增加对领域边界、业务不变量和职责分层的评审点
+- 可能需要补充 `design/references/ddd.md`，避免把完整 DDD 说明塞进主 skill
+
 ## Not Adopted
 
 | Proposal | Reason |
