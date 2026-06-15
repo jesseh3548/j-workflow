@@ -3,8 +3,14 @@ import argparse
 import glob
 import json
 import os
+import re
 import sys
 from datetime import datetime, timezone
+
+
+UUID_RE = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
 
 
 def parse_time(value):
@@ -16,6 +22,28 @@ def parse_time(value):
         return datetime.fromisoformat(value).timestamp()
     except Exception:
         return 0.0
+
+
+def file_mtime(path):
+    try:
+        return os.path.getmtime(path)
+    except OSError:
+        return 0.0
+
+
+def session_id_from_filename(path):
+    stem = os.path.splitext(os.path.basename(path))[0]
+    if UUID_RE.match(stem):
+        return stem
+    return ""
+
+
+def claude_project_key(project_dir):
+    return os.path.abspath(project_dir).replace(os.sep, "-")
+
+
+def claude_home():
+    return os.path.expanduser(os.environ.get("CLAUDE_HOME", "~/.claude"))
 
 
 def iter_jsonl(path):
@@ -31,6 +59,26 @@ def iter_jsonl(path):
                     continue
     except OSError:
         return
+
+
+def iter_json_objects(path):
+    yielded = False
+    for event in iter_jsonl(path):
+        yielded = True
+        yield event
+    if yielded:
+        return
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return
+    if isinstance(data, list):
+        for item in data:
+            if isinstance(item, dict):
+                yield item
+    elif isinstance(data, dict):
+        yield data
 
 
 def codex_candidates(project_dir, started_epoch):
@@ -51,40 +99,83 @@ def codex_candidates(project_dir, started_epoch):
             break
 
 
+def extract_cwd(payload, event):
+    cwd = payload.get("cwd") or payload.get("project_dir") or payload.get("projectDir")
+    if cwd:
+        return cwd
+    message = event.get("message")
+    if isinstance(message, dict):
+        return message.get("cwd") or message.get("project_dir") or message.get("projectDir")
+    return ""
+
+
+def extract_session_id(payload, event, path):
+    message = event.get("message")
+    if not isinstance(message, dict):
+        message = {}
+    return (
+        payload.get("id")
+        or payload.get("session_id")
+        or payload.get("sessionId")
+        or event.get("session_id")
+        or event.get("sessionId")
+        or message.get("session_id")
+        or message.get("sessionId")
+        or session_id_from_filename(path)
+    )
+
+
 def claude_candidates(project_dir, session_name, started_epoch):
+    home = claude_home()
     patterns = [
-        "~/.claude/projects/**/*.jsonl",
-        "~/.claude/sessions/**/*.jsonl",
-        "~/.claude/**/*.jsonl",
-        "~/.claude/**/*.json",
+        os.path.join(home, "projects", "**", "*.jsonl"),
+        os.path.join(home, "sessions", "**", "*.jsonl"),
+        os.path.join(home, "**", "*.jsonl"),
+        os.path.join(home, "**", "*.json"),
     ]
     seen = set()
+    project_key = claude_project_key(project_dir)
     for pattern in patterns:
         for path in glob.glob(os.path.expanduser(pattern), recursive=True):
             if path in seen:
                 continue
             seen.add(path)
-            for event in iter_jsonl(path):
+            path_mtime = file_mtime(path)
+            path_matches_project = project_key in path
+            session_name_seen = False
+            saw_cwd = False
+            best_candidate = None
+            for event in iter_json_objects(path):
                 payload = event.get("payload", event)
                 text = json.dumps(event, ensure_ascii=False)
-                if session_name and session_name not in text:
-                    continue
-                cwd = payload.get("cwd") or payload.get("project_dir") or payload.get("projectDir")
-                if cwd and os.path.abspath(cwd) != os.path.abspath(project_dir):
-                    continue
-                ts = parse_time(payload.get("timestamp") or event.get("timestamp") or payload.get("created_at"))
-                if ts and ts + 5 < started_epoch:
-                    continue
-                session_id = (
-                    payload.get("id")
-                    or payload.get("session_id")
-                    or payload.get("sessionId")
-                    or event.get("session_id")
-                    or event.get("sessionId")
+                if session_name and session_name in text:
+                    session_name_seen = True
+                cwd = extract_cwd(payload, event)
+                event_score = 0
+                if cwd:
+                    saw_cwd = True
+                    if os.path.abspath(cwd) != os.path.abspath(project_dir):
+                        continue
+                    event_score = 2
+                ts = (
+                    parse_time(payload.get("timestamp") or event.get("timestamp") or payload.get("created_at"))
+                    or path_mtime
                 )
+                if ts and ts + 10 < started_epoch:
+                    continue
+                session_id = extract_session_id(payload, event, path)
                 if session_id:
-                    yield ts, session_id, path
-                    break
+                    # Claude Code transcript files do not consistently include
+                    # the user-provided --name, so session_name is only a tie
+                    # breaker. cwd + start time are the hard filters.
+                    score = event_score or (1 if session_name_seen or path_matches_project else 0)
+                    best_candidate = (score, ts, session_id, path)
+
+            if best_candidate:
+                if saw_cwd is False and path_matches_project is False and session_name_seen is False:
+                    continue
+                score, ts, session_id, candidate_path = best_candidate
+                yield score, ts, session_id, candidate_path
 
 
 def main():
@@ -106,8 +197,8 @@ def main():
             candidates = list(claude_candidates(args.project_dir, args.session_name, args.started_epoch))
 
         if candidates:
-            candidates.sort(key=lambda item: item[0])
-            print(candidates[-1][1])
+            candidates.sort(key=lambda item: item[:2])
+            print(candidates[-1][2] if args.provider == "claude" else candidates[-1][1])
             return 0
 
         if time.time() >= deadline:

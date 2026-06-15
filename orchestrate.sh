@@ -2,7 +2,16 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BIN_DIR="$SCRIPT_DIR/bin"
+if [[ -x "$SCRIPT_DIR/bin/workflow-state" ]]; then
+    # Source checkout layout: orchestrate.sh at repo root, helpers in ./bin.
+    BIN_DIR="$SCRIPT_DIR/bin"
+elif [[ -x "$SCRIPT_DIR/workflow-state" ]]; then
+    # Installed layout: orchestrate.sh and helper scripts live in the same bin dir.
+    BIN_DIR="$SCRIPT_DIR"
+else
+    echo "Cannot find workflow helper scripts near $SCRIPT_DIR" >&2
+    exit 1
+fi
 
 # ============================================================
 # Multi-Agent Development Orchestrator
@@ -41,6 +50,7 @@ MODEL_FROM_USER=false
 SKIP_PHASES=()
 AUTO_MODE=false
 RESUME_MODE=false
+GHOSTTY_WINDOW_ID=""
 
 # Phase breakpoints (default: semi-auto)
 BP_AFTER_EXPLORE=false
@@ -131,6 +141,28 @@ detect_codex_default_model() {
         fi
     fi
     echo "gpt-5.5"
+}
+
+detect_ghostty_window() {
+    if [[ -n "$GHOSTTY_WINDOW_ID" ]]; then
+        return
+    fi
+    if ! command -v osascript >/dev/null 2>&1; then
+        return
+    fi
+    GHOSTTY_WINDOW_ID="$(osascript -e '
+        tell application "Ghostty"
+            if (count of windows) > 0 then
+                return id of window 1
+            else
+                return "not_found"
+            end if
+        end tell
+    ' 2>/dev/null || echo "not_found")"
+    if [[ "$GHOSTTY_WINDOW_ID" == "not_found" ]]; then
+        GHOSTTY_WINDOW_ID=""
+        log_warn "无法检测 Ghostty 当前窗口，新阶段可能 fallback 到新窗口"
+    fi
 }
 
 state_cmd() {
@@ -370,6 +402,10 @@ log_info "工作区:   $WORKSPACE_DIR"
 log_info "Provider: $PROVIDER"
 log_info "模型:     $MODEL"
 log_info "自动模式: $AUTO_MODE"
+detect_ghostty_window
+if [[ -n "$GHOSTTY_WINDOW_ID" ]]; then
+    log_info "Ghostty 窗口: $GHOSTTY_WINDOW_ID"
+fi
 if [[ "$RESUME_MODE" == true ]]; then
     log_info "续跑模式: 已有产出的阶段将被跳过"
 fi
@@ -530,7 +566,11 @@ RUNEOF
 
     # 在当前 Ghostty 窗口中打开新 tab 执行脚本
     rm -f "$started_marker"
-    "$BIN_DIR/ghostty-open-tab" --script "$run_script" --cwd "$PROJECT_DIR" --verify-file "$started_marker"
+    if [[ -n "$GHOSTTY_WINDOW_ID" ]]; then
+        "$BIN_DIR/ghostty-open-tab" --script "$run_script" --cwd "$PROJECT_DIR" --verify-file "$started_marker" --window-id "$GHOSTTY_WINDOW_ID"
+    else
+        "$BIN_DIR/ghostty-open-tab" --script "$run_script" --cwd "$PROJECT_DIR" --verify-file "$started_marker"
+    fi
 
     if [[ -z "$resume_phase" ]]; then
         local discovered_session_id

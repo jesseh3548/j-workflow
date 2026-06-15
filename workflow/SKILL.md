@@ -191,6 +191,59 @@ rm -f "$WORKSPACE/requirement-review/"* "$WORKSPACE/design/"* "$WORKSPACE/review
 
 检查项目目录是否有 CLAUDE.md，没有则警告。
 
+**第四步：初始化 Ghostty helper**
+
+准备阶段必须一次性初始化 helper 路径和 Ghostty 窗口 id，后续所有 phase 都复用同一个 `open_phase_tab` 函数，不要每个阶段重新检测窗口，也不要重新实现 AppleScript。
+
+原因：从 Claude Code / Codex 的 Bash tool 或后台子进程调用时，stdout 通常不是 tty，不能依赖 OSC title marker 定位当前 tab。必须在准备阶段取一次 Ghostty frontmost window id，然后通过 `bin/ghostty-open-tab --window-id` 显式传入。
+
+```bash
+# Resolve helper script. Source checkout layout uses ./bin; installed layout may
+# put helper scripts beside orchestrate.sh or expose WORKFLOW_BIN_DIR explicitly.
+if [ -n "${WORKFLOW_BIN_DIR:-}" ] && [ -x "$WORKFLOW_BIN_DIR/ghostty-open-tab" ]; then
+    WORKFLOW_BIN_DIR="$WORKFLOW_BIN_DIR"
+elif [ -x "./bin/ghostty-open-tab" ]; then
+    WORKFLOW_BIN_DIR="$(pwd)/bin"
+elif [ -x "./ghostty-open-tab" ]; then
+    WORKFLOW_BIN_DIR="$(pwd)"
+else
+    echo "Cannot find ghostty-open-tab helper; set WORKFLOW_BIN_DIR or run from j-workflow checkout" >&2
+    exit 1
+fi
+
+GHOSTTY_WINDOW_ID=$(osascript -e '
+tell application "Ghostty"
+    if (count of windows) > 0 then
+        return id of window 1
+    else
+        return "not_found"
+    end if
+end tell
+' 2>/dev/null || echo "not_found")
+if [ "$GHOSTTY_WINDOW_ID" = "not_found" ]; then
+    GHOSTTY_WINDOW_ID=""
+fi
+
+open_phase_tab() {
+    phase_run_script="$1"
+    phase_project_dir="$2"
+    phase_started_marker="$3"
+
+    if [ -n "$GHOSTTY_WINDOW_ID" ]; then
+        "$WORKFLOW_BIN_DIR/ghostty-open-tab" \
+            --script "$phase_run_script" \
+            --cwd "$phase_project_dir" \
+            --verify-file "$phase_started_marker" \
+            --window-id "$GHOSTTY_WINDOW_ID"
+    else
+        "$WORKFLOW_BIN_DIR/ghostty-open-tab" \
+            --script "$phase_run_script" \
+            --cwd "$phase_project_dir" \
+            --verify-file "$phase_started_marker"
+    fi
+}
+```
+
 ## Phase 执行机制
 
 每个阶段的执行都遵循相同的模式。以下是你作为编排器需要做的。
@@ -240,13 +293,13 @@ codex resume -m "<model>" -C "<project_dir>" "<session_id>" "$(cat '<prompt_file
 
 ### Step 3: 开 Ghostty tab
 
-不要在 skill 中重新实现 AppleScript。调用仓库共享脚本：
+不要在 skill 中重新实现 AppleScript，也不要直接手写 `bin/ghostty-open-tab ...`。必须调用 Phase 0.4 中初始化的 `open_phase_tab` 函数，确保所有阶段复用同一个 `GHOSTTY_WINDOW_ID`。
 
 ```bash
-bin/ghostty-open-tab --script "<run_script_path>" --cwd "<project_dir>" --verify-file "<started_marker>"
+open_phase_tab "<run_script_path>" "<project_dir>" "<started_marker>"
 ```
 
-该脚本负责定位当前 Ghostty 窗口、开新 tab 或 fallback 到新窗口，并用 started marker 验证启动成功。
+该脚本优先使用传入的窗口 id 开新 tab；未传入时 fallback 到 Ghostty frontmost window，最后才 fallback 到新窗口。started marker 用于验证启动成功。
 
 ### Step 4: 后台轮询等待
 

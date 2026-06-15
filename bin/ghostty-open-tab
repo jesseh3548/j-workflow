@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
     cat <<'EOF'
-Usage: ghostty-open-tab --script <path> --cwd <dir> [--verify-file <path>]
+Usage: ghostty-open-tab --script <path> --cwd <dir> [--verify-file <path>] [--window-id <id>]
 
 Open a Ghostty tab or window and run the provided script.
 EOF
@@ -12,12 +12,14 @@ EOF
 SCRIPT_PATH=""
 WORKING_DIR=""
 VERIFY_FILE=""
+GHOSTTY_WINDOW_ID=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --script) SCRIPT_PATH="$2"; shift 2 ;;
         --cwd) WORKING_DIR="$2"; shift 2 ;;
         --verify-file) VERIFY_FILE="$2"; shift 2 ;;
+        --window-id) GHOSTTY_WINDOW_ID="$2"; shift 2 ;;
         -h|--help) usage; exit 0 ;;
         *) echo "[ERROR] unknown argument: $1" >&2; usage; exit 1 ;;
     esac
@@ -33,23 +35,18 @@ if [[ ! -f "$SCRIPT_PATH" ]]; then
     exit 1
 fi
 
-GHOSTTY_WINDOW_ID=""
-
 detect_window() {
-    local marker="orchestrator-$$-$(date +%s)"
-    printf '\033]2;%s\007' "$marker"
-    sleep 0.3
+    if [[ -n "$GHOSTTY_WINDOW_ID" ]]; then
+        return
+    fi
 
     GHOSTTY_WINDOW_ID=$(osascript -e "
         tell application \"Ghostty\"
-            repeat with w in windows
-                repeat with t in tabs of w
-                    if name of t contains \"$marker\" then
-                        return id of w
-                    end if
-                end repeat
-            end repeat
-            return \"not_found\"
+            if (count of windows) > 0 then
+                return id of window 1
+            else
+                return \"not_found\"
+            end if
         end tell
     " 2>/dev/null || echo "not_found")
 

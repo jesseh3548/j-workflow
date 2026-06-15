@@ -49,7 +49,7 @@ orchestrate.sh --project ~/code/xxx --requirement req.md \
 
 **Problem**: revise 用 `--resume <session-name>` 续接 design session，但多次测试后会产生多个同名 session，导致弹出交互式选择器而非自动续接。
 
-**Fix**: 改用 `--session-id <uuid>` 精确续接。design 阶段结束后从 `~/.claude/sessions/` 中按 name 查找最新的 session ID 写入 `design/.session-id`，revise 时读取并用 `--session-id` 续接。
+**Fix**: 改用 `--session-id <uuid>` 精确续接。design 阶段结束后从 Claude Code 的 session 存储目录（默认 `~/.claude`，可通过 `CLAUDE_HOME` 覆盖）查找最新 session ID，写入 workflow state；revise 时读取并用 `--session-id` 续接。
 
 ### 6. 产出质量自动校验（低优）
 
@@ -131,7 +131,7 @@ orchestrate.sh --project ~/code/xxx --requirement req.md \
 **涉及改动**：
 - `orchestrate.sh` — 每个阶段完成后调用通知
 - `workflow/SKILL.md` — 编排器在阶段间确认前发通知
-- 新增 `~/.claude/bin/notify-lark.sh`（或内联到编排器）
+- 新增 `bin/notify-lark.sh`（或内联到编排器），安装时同步到当前 provider 的工具目录
 - 配置文件新增 `LARK_WEBHOOK_URL` 字段
 
 ### 16. 大 PRD 上下文溢出 — 需求文档预处理（高优）
@@ -165,7 +165,7 @@ orchestrate.sh --project ~/code/xxx --requirement req.md \
 **涉及改动**：
 - `workflow/SKILL.md` — Phase 0 新增摘要步骤，各阶段 prompt 改为引用摘要
 - `orchestrate.sh` — 同步新增摘要步骤
-- 新增 `~/.claude/skills/summarize-requirement/SKILL.md`（或内联到编排器）
+- 新增 `summarize-requirement/SKILL.md`（或内联到编排器），安装时同步到当前 provider 的 skills 目录
 - 各阶段 prompt 中 `requirement.md` 引用改为 `requirement-summary.md` + 按需引用原文
 
 ### 10. 动态流编排 — 可组装的 Agent 流水线（未来）
@@ -345,6 +345,59 @@ orchestrate.sh --project ~/code/xxx --requirement req.md \
 - `review-plan/SKILL.md` — 增加对领域边界、业务不变量和职责分层的评审点
 - 可能需要补充 `design/references/ddd.md`，避免把完整 DDD 说明塞进主 skill
 
+### 31. review-plan 验证方案隐含假设（高优）
+
+**Problem**: `review-plan` 当前主要靠主动探索现有系统来发现问题，但缺少一个被动核查动作：把方案中关于现有代码行为的陈述和隐含前提提取出来，逐条读代码验证。实际测试中，方案声称需要新增兼容解密方法，但现有方法的异常兜底已经满足兼容行为；评审只验证了新方法设计本身，没有验证“现有方法不满足”的前提，导致不必要设计进入修正阶段。
+
+**Fix**: 增强 `review-plan/SKILL.md`：
+- Step 2 增加“提取并验证方案隐含假设”子步骤
+- 对方案中“现有方法/类做什么”的描述，必须读源码验证
+- 对新增方法/类，必须找最相近现有实现，用新场景典型输入推演执行路径
+- 特别追查异常传播链，确认异常是否已被上层兜住并返回可用结果
+- Checklist 1 复用性从“是否有类似实现”改为“读代码验证现有实现是否已满足新场景”
+- 在注意事项中明确：评审者的认知必须来自自己读代码，方案对现有系统的描述只是待验证假设
+
+**涉及改动**：
+- `review-plan/SKILL.md`
+
+### 32. 纯分析阶段迁移到原生 Agent / 非 Ghostty 执行（中优）
+
+**Problem**: 当前所有阶段都通过 Ghostty 新 tab 启动独立 session，并用 `.done` 文件轮询。对 review-requirement、explore、review-plan、review-code、verify-observability 这类纯分析阶段来说，开 tab、生成 run script、导出环境变量、AppleScript、轮询完成标记都偏重。
+
+**Fix**: 将纯分析阶段改为更轻量的执行模式，保留 design / implement / revise / fix 的 Ghostty 隔离和可交互续接。
+
+**候选范围**：
+- review-requirement：纯分析，无续接需求
+- explore：纯调研，无深度交互
+- review-plan：纯评审，产出 review.md + VERDICT
+- review-code：纯评审，产出 code-review-rN.md + VERDICT
+- verify-observability：纯验证，产出验证报告
+
+**实现方向**：
+- `/workflow` skill 中优先用原生 Agent tool 调用这些阶段，Agent 返回即完成，不追加 `.done` 指令
+- `orchestrate.sh` 可选增加 `run_phase_native` / print-mode 执行路径，用于非交互分析阶段
+- design / implement / revise / fix 继续使用 Ghostty tab，因为它们需要深度交互、跨天续接或精确 resume
+
+**风险和待确认**：
+- shell 版 `orchestrate.sh` 使用 Claude/Codex CLI 的非交互模式时，是否能稳定调用本地 skills，需要单独验证
+- 原生 Agent 模式和独立 session 隔离目标是否冲突，需要明确“隔离”的最低要求是上下文隔离还是终端 tab 隔离
+
+**涉及改动**：
+- `workflow/SKILL.md`
+- `orchestrate.sh`
+
+### 33. Ghostty 窗口选择持久化与手动指定（低优）
+
+**Problem**: 当前修复已在编排器启动时检测一次 Ghostty frontmost window id，并在本次进程内传给 `ghostty-open-tab`，避免非 TTY 调用时 title-marker 检测失败导致每阶段开新窗口。但窗口 id 还没有持久化到 `workflow-state.json`，`--resume` 新进程会重新检测 frontmost window；如果用户此时切到另一个 Ghostty 窗口，后续阶段可能开到错误窗口。
+
+**Fix**:
+- 在 `workflow-state.json` 增加 workflow-level metadata，记录 `ghostty_window_id`
+- `orchestrate.sh --resume` 优先读取 state 中的窗口 id，只有缺失时才重新检测 frontmost window
+- 增加显式参数 `--ghostty-window-id <id>`，允许用户手动指定目标窗口
+- `workflow/SKILL.md` 同步说明窗口 id 的保存、恢复和手动覆盖规则
+
+**暂缓原因**: 当前 `workflow-state` helper 还没有通用 metadata API，强行写入会扩大状态模型改动面。先用进程变量解决“每阶段误开新窗口”的主要问题。
+
 ## Not Adopted
 
 | Proposal | Reason |
@@ -354,11 +407,15 @@ orchestrate.sh --project ~/code/xxx --requirement req.md \
 
 ## Files Involved
 
-- `~/.claude/bin/orchestrate.sh` — Shell 编排器
-- `~/.claude/skills/review-requirement/SKILL.md` — 需求审视 skill
-- `~/.claude/skills/design/SKILL.md` — 方案设计 skill
-- `~/.claude/skills/review-plan/SKILL.md` — 方案评审 skill
-- `~/.claude/skills/implement/SKILL.md` — TDD 实现 skill
-- `~/.claude/skills/review-code/SKILL.md` — 代码评审 skill
-- `~/.claude/skills/verify-observability/SKILL.md` — 可观测性验证 skill
-- `~/.claude/skills/workflow/SKILL.md` — 编排器 skill
+Repository source paths:
+- `orchestrate.sh` — Shell 编排器
+- `bin/` — shared helper scripts
+- `review-requirement/SKILL.md` — 需求审视 skill
+- `design/SKILL.md` — 方案设计 skill
+- `review-plan/SKILL.md` — 方案评审 skill
+- `implement/SKILL.md` — TDD 实现 skill
+- `review-code/SKILL.md` — 代码评审 skill
+- `verify-observability/SKILL.md` — 可观测性验证 skill
+- `workflow/SKILL.md` — 编排器 skill
+
+Provider install locations are environment-specific. Do not assume `~/.claude` exists in Codex-only environments; Claude Code defaults to `~/.claude` and may be overridden with `CLAUDE_HOME`, while Codex defaults to `~/.codex` and may be overridden with `CODEX_HOME`.
