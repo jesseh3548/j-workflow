@@ -197,6 +197,8 @@ rm -f "$WORKSPACE/requirement-review/"* "$WORKSPACE/design/"* "$WORKSPACE/review
 
 原因：从 Claude Code / Codex 的 Bash tool 或后台子进程调用时，stdout 通常不是 tty，不能依赖 OSC title marker 定位当前 tab。必须在准备阶段取一次 Ghostty frontmost window id，然后通过 `bin/ghostty-open-tab --window-id` 显式传入。
 
+输入法注意：`ghostty-open-tab` 会在创建新 tab 前先把 macOS 输入源切到 ABC，避免中文输入法把启动命令中的 `bash` 等字符转换成中文。不要通过 keystroke/粘贴方式向 Ghostty 输入启动命令；必须使用 helper 的 `command of cfg` 方式启动 run script。run script 内部的输入法切换只作为 agent 交互阶段的兜底，不负责启动命令阶段。
+
 ```bash
 # Resolve helper script. Source checkout layout uses ./bin; installed layout may
 # put helper scripts beside orchestrate.sh or expose WORKFLOW_BIN_DIR explicitly.
@@ -299,7 +301,7 @@ codex resume -m "<model>" -C "<project_dir>" "<session_id>" "$(cat '<prompt_file
 open_phase_tab "<run_script_path>" "<project_dir>" "<started_marker>"
 ```
 
-该脚本优先使用传入的窗口 id 开新 tab；未传入时 fallback 到 Ghostty frontmost window，最后才 fallback 到新窗口。started marker 用于验证启动成功。
+该脚本会先切换 ABC 输入源，再优先使用传入的窗口 id 开新 tab；未传入时 fallback 到 Ghostty frontmost window，最后才 fallback 到新窗口。started marker 用于验证启动成功。
 
 ### Step 4: 后台轮询等待
 

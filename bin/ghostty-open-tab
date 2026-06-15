@@ -35,6 +35,13 @@ if [[ ! -f "$SCRIPT_PATH" ]]; then
     exit 1
 fi
 
+switch_to_abc_input() {
+    if ! command -v swift >/dev/null 2>&1; then
+        return
+    fi
+    swift -e 'import Carbon; let s = TISCreateInputSourceList([kTISPropertyInputSourceID: "com.apple.keylayout.ABC" as CFString] as CFDictionary, false)!.takeRetainedValue() as! [TISInputSource]; if let i = s.first { TISSelectInputSource(i) }' 2>/dev/null || true
+}
+
 detect_window() {
     if [[ -n "$GHOSTTY_WINDOW_ID" ]]; then
         return
@@ -82,6 +89,7 @@ open_surface() {
     fi
 }
 
+switch_to_abc_input
 detect_window
 
 max_retries=3
