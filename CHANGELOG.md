@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Fix Ghostty phase run scripts failing with `claude: command not found` / `codex: command not found` when the CLI executable is not available in the non-interactive shell PATH. The orchestrator now resolves Claude Code/Codex to an absolute executable path up front and writes that path into generated run scripts.
+- Add `CLAUDE_BIN` / `CODEX_BIN` override support for non-standard CLI install locations.
+
 ## v2.3 — 2026-05-17
 
 ### Skill 调用重构（消除 prompt 重复）

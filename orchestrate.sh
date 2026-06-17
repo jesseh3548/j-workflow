@@ -44,6 +44,7 @@ TASK_NAME=""
 WORKSPACE_DIR=""
 CONFIG_FILE=""
 PROVIDER=""
+PROVIDER_CLI=""
 PROVIDER_FROM_CLI=false
 MODEL="claude-sonnet-4-6"
 MODEL_FROM_USER=false
@@ -111,21 +112,78 @@ wait_for_user() {
 }
 
 detect_provider() {
+    provider_bin_var() {
+        case "$1" in
+            claude) echo "CLAUDE_BIN" ;;
+            codex) echo "CODEX_BIN" ;;
+            *) echo "PROVIDER_BIN" ;;
+        esac
+    }
+
+    resolve_provider_cli() {
+        local provider_name="$1"
+        local binary_name="$provider_name"
+        local override=""
+        local candidate=""
+
+        case "$provider_name" in
+            claude) override="${CLAUDE_BIN:-}" ;;
+            codex) override="${CODEX_BIN:-}" ;;
+            *) return 1 ;;
+        esac
+
+        if [[ -n "$override" ]]; then
+            if [[ -x "$override" ]]; then
+                echo "$override"
+                return 0
+            fi
+            echo "[ERROR] ${provider_name} CLI override is not executable: $override" >&2
+            return 1
+        fi
+
+        candidate="$(type -P "$binary_name" 2>/dev/null || true)"
+        if [[ -n "$candidate" && -x "$candidate" ]]; then
+            echo "$candidate"
+            return 0
+        fi
+
+        for candidate in \
+            "/opt/homebrew/bin/$binary_name" \
+            "/usr/local/bin/$binary_name" \
+            "$HOME/.local/bin/$binary_name" \
+            "$HOME/.npm-global/bin/$binary_name"; do
+            if [[ -x "$candidate" ]]; then
+                echo "$candidate"
+                return 0
+            fi
+        done
+
+        return 1
+    }
+
     if [[ -n "$PROVIDER" ]]; then
         case "$PROVIDER" in
-            claude|codex) return 0 ;;
+            claude|codex)
+                PROVIDER_CLI="$(resolve_provider_cli "$PROVIDER" || true)"
+                if [[ -z "$PROVIDER_CLI" ]]; then
+                    log_error "无法找到 $PROVIDER CLI。可设置 $(provider_bin_var "$PROVIDER")=/path/to/$PROVIDER 后重试"
+                    exit 1
+                fi
+                return 0
+                ;;
             *) log_error "未知 provider: $PROVIDER（仅支持 claude/codex）"; exit 1 ;;
         esac
     fi
 
-    if printenv | grep -q '^CODEX_' && command -v codex >/dev/null 2>&1; then
+    if printenv | grep -q '^CODEX_' && PROVIDER_CLI="$(resolve_provider_cli codex || true)" && [[ -n "$PROVIDER_CLI" ]]; then
         PROVIDER="codex"
-    elif command -v claude >/dev/null 2>&1; then
+    elif PROVIDER_CLI="$(resolve_provider_cli claude || true)" && [[ -n "$PROVIDER_CLI" ]]; then
         PROVIDER="claude"
-    elif command -v codex >/dev/null 2>&1; then
+    elif PROVIDER_CLI="$(resolve_provider_cli codex || true)" && [[ -n "$PROVIDER_CLI" ]]; then
         PROVIDER="codex"
     else
         log_error "无法找到可用 agent CLI：需要 claude 或 codex"
+        log_error "如果 CLI 不在非交互 shell 的 PATH 中，可设置 CLAUDE_BIN 或 CODEX_BIN 为绝对路径"
         exit 1
     fi
 }
@@ -400,6 +458,7 @@ if [[ -n "$EXPLORE_IDEA" ]]; then
 fi
 log_info "工作区:   $WORKSPACE_DIR"
 log_info "Provider: $PROVIDER"
+log_info "CLI:      $PROVIDER_CLI"
 log_info "模型:     $MODEL"
 log_info "自动模式: $AUTO_MODE"
 detect_ghostty_window
@@ -495,6 +554,7 @@ echo "\$\$" > "${started_marker}"
 echo -e "\033[1;36m════════════════════════════════════════\033[0m"
 echo -e "\033[1;36m  Session: ${session_name}\033[0m"
 echo -e "\033[1;36m  Provider:${PROVIDER}\033[0m"
+echo -e "\033[1;36m  CLI:     ${PROVIDER_CLI}\033[0m"
 echo -e "\033[1;36m  Model:   ${phase_model}\033[0m"
 echo -e "\033[1;36m  Project: ${PROJECT_DIR}\033[0m"
 echo -e "\033[1;36m════════════════════════════════════════\033[0m"
@@ -503,7 +563,7 @@ echo ""
 # 用户确认后 agent 写 .done，编排器检测到即推进下一阶段
 if [[ "${PROVIDER}" == "claude" ]]; then
     if [[ -n "${resume_session_id}" ]]; then
-        claude \\
+        "${PROVIDER_CLI}" \\
             --model "$phase_model" \\
             --session-id "${resume_session_id}" \\
             --add-dir "$PROJECT_DIR" \\
@@ -511,7 +571,7 @@ if [[ "${PROVIDER}" == "claude" ]]; then
             --verbose \\
             -- "\$(cat '${prompt_file}')"
     elif [[ -n "${resume_session_name}" ]]; then
-        claude \\
+        "${PROVIDER_CLI}" \\
             --model "$phase_model" \\
             --add-dir "$PROJECT_DIR" \\
             --permission-mode default \\
@@ -519,7 +579,7 @@ if [[ "${PROVIDER}" == "claude" ]]; then
             --resume "${resume_session_name}" \\
             -- "\$(cat '${prompt_file}')"
     else
-        claude \\
+        "${PROVIDER_CLI}" \\
             --model "$phase_model" \\
             --name "$session_name" \\
             --add-dir "$PROJECT_DIR" \\
@@ -529,13 +589,13 @@ if [[ "${PROVIDER}" == "claude" ]]; then
     fi
 elif [[ "${PROVIDER}" == "codex" ]]; then
     if [[ -n "${resume_session_id}" ]]; then
-        codex resume \\
+        "${PROVIDER_CLI}" resume \\
             -m "$phase_model" \\
             -C "$PROJECT_DIR" \\
             "${resume_session_id}" \\
             "\$(cat '${prompt_file}')"
     else
-        codex \\
+        "${PROVIDER_CLI}" \\
             -m "$phase_model" \\
             -C "$PROJECT_DIR" \\
             "\$(cat '${prompt_file}')"

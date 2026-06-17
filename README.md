@@ -112,6 +112,7 @@ Provider support:
 
 - Use `--provider claude|codex` to select the agent CLI used for phase sessions.
 - Use `--model <model>` to select the model for either provider. Codex defaults to the model in `~/.codex/config.toml` when `--model` is omitted.
+- The orchestrator resolves the selected CLI to an absolute path before opening Ghostty tabs. If the CLI is not in a non-interactive shell PATH, set `CLAUDE_BIN` or `CODEX_BIN` to the executable path.
 - Support only Claude Code and Codex initially.
 - Keep Ghostty tab orchestration as the session isolation boundary.
 - Track phase status and session IDs in `workflow-state.json`.

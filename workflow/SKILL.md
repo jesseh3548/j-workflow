@@ -226,6 +226,44 @@ if [ "$GHOSTTY_WINDOW_ID" = "not_found" ]; then
     GHOSTTY_WINDOW_ID=""
 fi
 
+resolve_provider_cli() {
+    provider_name="$1"
+    binary_name="$provider_name"
+    override=""
+    case "$provider_name" in
+        claude) override="${CLAUDE_BIN:-}" ;;
+        codex) override="${CODEX_BIN:-}" ;;
+        *) return 1 ;;
+    esac
+
+    if [ -n "$override" ]; then
+        [ -x "$override" ] && printf '%s\n' "$override" && return 0
+        echo "$provider_name CLI override is not executable: $override" >&2
+        return 1
+    fi
+
+    command_path="$(command -v "$binary_name" 2>/dev/null || true)"
+    if [ -n "$command_path" ] && [ -x "$command_path" ]; then
+        printf '%s\n' "$command_path"
+        return 0
+    fi
+
+    for candidate in \
+        "/opt/homebrew/bin/$binary_name" \
+        "/usr/local/bin/$binary_name" \
+        "$HOME/.local/bin/$binary_name" \
+        "$HOME/.npm-global/bin/$binary_name"; do
+        [ -x "$candidate" ] && printf '%s\n' "$candidate" && return 0
+    done
+
+    return 1
+}
+
+PROVIDER_CLI="$(resolve_provider_cli "$PROVIDER")" || {
+    echo "Cannot find $PROVIDER CLI. Set CLAUDE_BIN or CODEX_BIN to an absolute path." >&2
+    exit 1
+}
+
 open_phase_tab() {
     phase_run_script="$1"
     phase_project_dir="$2"
@@ -279,17 +317,19 @@ provider 命令规则：
 
 ```bash
 # Claude Code 新 session
-claude --model "<model>" --name "<session_name>" --add-dir "<project_dir>" --permission-mode default --verbose -- "$(cat '<prompt_file>')"
+"<provider_cli>" --model "<model>" --name "<session_name>" --add-dir "<project_dir>" --permission-mode default --verbose -- "$(cat '<prompt_file>')"
 
 # Claude Code 精确续接
-claude --model "<model>" --session-id "<session_id>" --add-dir "<project_dir>" --permission-mode default --verbose -- "$(cat '<prompt_file>')"
+"<provider_cli>" --model "<model>" --session-id "<session_id>" --add-dir "<project_dir>" --permission-mode default --verbose -- "$(cat '<prompt_file>')"
 
 # Codex 新 session
-codex -m "<model>" -C "<project_dir>" "$(cat '<prompt_file>')"
+"<provider_cli>" -m "<model>" -C "<project_dir>" "$(cat '<prompt_file>')"
 
 # Codex 精确续接
-codex resume -m "<model>" -C "<project_dir>" "<session_id>" "$(cat '<prompt_file>')"
+"<provider_cli>" resume -m "<model>" -C "<project_dir>" "<session_id>" "$(cat '<prompt_file>')"
 ```
+
+`<provider_cli>` 必须是 Phase 0.4 中解析到的绝对路径，不要在 run script 中直接写 `claude` 或 `codex`。Ghostty 新 tab 中运行的是非交互 shell，不会加载用户 shell alias/profile；如 CLI 不在常见路径中，用户可通过 `CLAUDE_BIN` 或 `CODEX_BIN` 指定。
 
 需要传递的环境变量按 provider 最小化处理。Claude/Bedrock 相关变量、OpenAI/Codex 相关变量、AWS 变量和 `HOME` 可按需注入 run script。
 
