@@ -63,29 +63,43 @@ detect_window() {
 }
 
 open_surface() {
+    local launcher_path
+    local quoted_working_dir
+    local quoted_script_path
+    printf -v quoted_working_dir "%q" "$WORKING_DIR"
+    printf -v quoted_script_path "%q" "$SCRIPT_PATH"
+    launcher_path="$(mktemp /private/tmp/jworkflow-ghostty-launcher.XXXXXX)"
+    cat > "$launcher_path" << LAUNCHER
+#!/bin/bash
+rm -f "\$0" 2>/dev/null || true
+cd $quoted_working_dir
+exec $quoted_script_path
+LAUNCHER
+    chmod +x "$launcher_path"
+
     if [[ -n "$GHOSTTY_WINDOW_ID" ]]; then
         osascript -e "
             tell application \"Ghostty\"
                 set cfg to new surface configuration
                 set initial working directory of cfg to \"$WORKING_DIR\"
-                set command of cfg to \"bash $SCRIPT_PATH\"
+                set command of cfg to \"$launcher_path\"
                 set wait after command of cfg to true
                 set environment variables of cfg to {\"NODE_TLS_REJECT_UNAUTHORIZED=0\"}
                 set win to window id \"$GHOSTTY_WINDOW_ID\"
                 new tab in win with configuration cfg
             end tell
-        " 2>/dev/null
+        " 2>/dev/null || { rm -f "$launcher_path"; return 1; }
     else
         osascript -e "
             tell application \"Ghostty\"
                 set cfg to new surface configuration
                 set initial working directory of cfg to \"$WORKING_DIR\"
-                set command of cfg to \"bash $SCRIPT_PATH\"
+                set command of cfg to \"$launcher_path\"
                 set wait after command of cfg to true
                 set environment variables of cfg to {\"NODE_TLS_REJECT_UNAUTHORIZED=0\"}
                 new window with configuration cfg
             end tell
-        " 2>/dev/null
+        " 2>/dev/null || { rm -f "$launcher_path"; return 1; }
     fi
 }
 

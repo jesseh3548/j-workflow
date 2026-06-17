@@ -197,7 +197,7 @@ rm -f "$WORKSPACE/requirement-review/"* "$WORKSPACE/design/"* "$WORKSPACE/review
 
 原因：从 Claude Code / Codex 的 Bash tool 或后台子进程调用时，stdout 通常不是 tty，不能依赖 OSC title marker 定位当前 tab。必须在准备阶段取一次 Ghostty frontmost window id，然后通过 `bin/ghostty-open-tab --window-id` 显式传入。
 
-输入法注意：`ghostty-open-tab` 会在创建新 tab 前先把 macOS 输入源切到 ABC，避免中文输入法把启动命令中的 `bash` 等字符转换成中文。不要通过 keystroke/粘贴方式向 Ghostty 输入启动命令；必须使用 helper 的 `command of cfg` 方式启动 run script。run script 内部的输入法切换只作为 agent 交互阶段的兜底，不负责启动命令阶段。
+输入法注意：`ghostty-open-tab` 会在创建新 tab 前先把 macOS 输入源切到 ABC，避免中文输入法把启动命令中的 `bash` 等字符转换成中文。不要通过 keystroke/粘贴方式向 Ghostty 输入启动命令；必须使用 helper 的 `command of cfg` 方式启动 run script。helper 会生成一个无空格路径的临时 launcher，并将 `command of cfg` 指向该 launcher，再由 launcher `exec` 真正的 run script，避免 Ghostty 对 `bash <script>` 参数拆分和中文输入法干扰。run script 内部的输入法切换只作为 agent 交互阶段的兜底，不负责启动命令阶段。
 
 ```bash
 # Resolve helper script. Source checkout layout uses ./bin; installed layout may
@@ -312,6 +312,7 @@ echo "0" > "<workspace>/<phase>/<phase>.done"
 - 输出 provider/model/project/session 信息
 - 根据 provider 启动 agent CLI
 - 如果 agent 退出但没有写 `.done`，用 exit code 兜底写 `.done`
+- 写入后必须执行 `chmod +x "<run_script_path>"`，因为 `ghostty-open-tab` 的临时 launcher 会直接 `exec` run script，而不是通过 `bash <run_script>` 间接执行。
 
 provider 命令规则：
 
@@ -529,6 +530,7 @@ plan.md 是实现的唯一设计依据。历史评审和修正记录不传给 im
 - 方案路径：{dir_design}/plan.md
 - 项目路径：{project_dir}
 - 报告输出路径：{dir_review_code}/code-review-rN.md（N 为当前轮次，如 code-review-r1.md）
+- 审查要求：不要只看 diff；必须从变更点扩展到调用方、被调方、测试、配置、数据模型、相似实现，并在报告中写明审查覆盖与缺口。
 {review_code_context}
 ```
 

@@ -4,6 +4,9 @@
 
 - Fix Ghostty phase run scripts failing with `claude: command not found` / `codex: command not found` when the CLI executable is not available in the non-interactive shell PATH. The orchestrator now resolves Claude Code/Codex to an absolute executable path up front and writes that path into generated run scripts.
 - Add `CLAUDE_BIN` / `CODEX_BIN` override support for non-standard CLI install locations.
+- Start Ghostty phases through a temporary no-space launcher script instead of `bash <run_script>`, avoiding Chinese IME conversion of `bash` and Ghostty command argument parsing failures.
+- Rework the `review-code` skill to expand review context beyond changed hunks, report callers/callees/tests/config coverage, and keep review separate from code fixing.
+- Restructure `review-code` rules into an Alibaba Java Coding Guidelines-style hierarchy with a routing index and focused rule files for programming, exception/logging, MySQL, project, security, testing, performance, and observability reviews.
 
 ## v2.3 — 2026-05-17
 
@@ -67,7 +70,7 @@ Agent 根据 diff 涉及的内容只读取相关维度的规则文件，初始 c
 
 ### 新增编码规则
 
-- `rules/oop.md`：禁止对 String 裸判 `!= null`，应用 `StringUtils.isBlank/isNotBlank`；Collection 用 `CollectionUtils.isEmpty`；通用对象用 `Objects.nonNull` 或 Optional
+- `rules/programming/oop.md`：禁止对 String 裸判 `!= null`，应用 `StringUtils.isBlank/isNotBlank`；Collection 用 `CollectionUtils.isEmpty`；通用对象用 `Objects.nonNull` 或 Optional
 
 ### Backlog 新增
 

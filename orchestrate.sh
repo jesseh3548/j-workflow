@@ -907,6 +907,7 @@ if [[ "$PHASE_REVIEW_CODE" == true && "$CODE_REVIEW_ALREADY_PASSED" == false ]];
 - 方案路径：$DIR_DESIGN/plan.md
 - 项目路径：$PROJECT_DIR
 - 报告输出路径：$DIR_REVIEW_CODE/code-review-r${CODE_REVIEW_ROUND}.md
+- 审查要求：不要只看 diff；必须从变更点扩展到调用方、被调方、测试、配置、数据模型、相似实现，并在报告中写明审查覆盖与缺口。
 - 评审上下文：${CODE_REVIEW_CONTEXT}
 
 最后必须给出一行总体裁决（这一行会被自动解析，格式必须严格）：
