@@ -43,14 +43,15 @@ def prompt_arg(prompt_file):
 
 def render_provider_command(args):
     cli = q(args.provider_cli)
-    model = q(args.model)
     project_dir = q(args.project_dir)
     prompt = prompt_arg(args.prompt_file)
+    claude_model = f"    --model {q(args.model)} \\\n" if args.model else ""
+    codex_model = f"    -m {q(args.model)} \\\n" if args.model else ""
 
     if args.provider == "claude":
         if args.resume_session_id:
             return f"""{cli} \\
-    --model {model} \\
+{claude_model}\
     --resume {q(args.resume_session_id)} \\
     --add-dir {project_dir} \\
     --permission-mode default \\
@@ -58,14 +59,14 @@ def render_provider_command(args):
     -- {prompt}"""
         if args.resume_session_name:
             return f"""{cli} \\
-    --model {model} \\
+{claude_model}\
     --add-dir {project_dir} \\
     --permission-mode default \\
     --verbose \\
     --resume {q(args.resume_session_name)} \\
     -- {prompt}"""
         return f"""{cli} \\
-    --model {model} \\
+{claude_model}\
     --name {q(args.session_name)} \\
     --add-dir {project_dir} \\
     --permission-mode default \\
@@ -75,12 +76,12 @@ def render_provider_command(args):
     if args.provider == "codex":
         if args.resume_session_id:
             return f"""{cli} resume \\
-    -m {model} \\
+{codex_model}\
     -C {project_dir} \\
     {q(args.resume_session_id)} \\
     {prompt}"""
         return f"""{cli} \\
-    -m {model} \\
+{codex_model}\
     -C {project_dir} \\
     {prompt}"""
 
@@ -90,6 +91,7 @@ def render_provider_command(args):
 def render_script(args):
     exports = env_exports()
     provider_command = render_provider_command(args)
+    display_model = args.model or "provider-default"
     state_file = q(args.state_file)
     workflow_state = q(args.workflow_state)
     phase = q(args.phase)
@@ -105,7 +107,7 @@ echo -e "\\033[1;36m════════════════════
 echo -e "\\033[1;36m  Session: {args.session_name}\\033[0m"
 echo -e "\\033[1;36m  Provider:{args.provider}\\033[0m"
 echo -e "\\033[1;36m  CLI:     {args.provider_cli}\\033[0m"
-echo -e "\\033[1;36m  Model:   {args.model}\\033[0m"
+echo -e "\\033[1;36m  Model:   {display_model}\\033[0m"
 echo -e "\\033[1;36m  Project: {args.project_dir}\\033[0m"
 echo -e "\\033[1;36m════════════════════════════════════════\\033[0m"
 echo ""

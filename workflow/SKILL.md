@@ -139,7 +139,7 @@ Codex 兼容规则：如果当前 Codex 运行环境没有可用的 Agent tool�
 - **需求来源** — 飞书链接、本地文件、口述
 - **要跑哪些阶段** — 默认全流程，可跳过部分
 - **Provider** — `claude` 或 `codex`。优先使用用户指定值；未指定时可交给 `orchestrate.sh` 自动推断
-- **模型** — Claude 默认 claude-sonnet-4-6；Codex 默认读取 `~/.codex/config.toml`，读不到时使用 gpt-5.5；复杂需求可按 provider 选择更强模型
+- **模型** — Claude 默认使用 Claude CLI 自身配置的模型；Codex 默认读取 `~/.codex/config.toml`，读不到时使用 gpt-5.5；复杂需求可按 provider 选择更强模型
 - **阶段模型覆盖** — 如用户希望设计/评审使用更强模型、实现使用较快模型，支持按阶段覆盖：`model_explore`、`model_design`、`model_review` / `model_review_plan`、`model_revise`、`model_implement`、`model_review_code`、`model_fix`。未指定的阶段继承全局模型。
 
 ### 0.2 获取需求文档
@@ -156,7 +156,7 @@ Codex 兼容规则：如果当前 Codex 运行环境没有可用的 Agent tool�
 
 1. **阶段范围** — 全流程 / 只出方案+评审 / 跳过代码评审
 2. **Provider** — Claude Code / Codex（默认按当前上下文推断）
-3. **模型** — 按 provider 选择。Claude Code 可选 Sonnet（默认）/ Opus；Codex 可选本机默认模型（读取 `~/.codex/config.toml`）/ 指定模型（如 `gpt-5.5`）
+3. **模型** — 按 provider 选择。Claude Code 默认使用 CLI 自身配置，也可显式指定 Sonnet / Opus；Codex 可选本机默认模型（读取 `~/.codex/config.toml`）/ 指定模型（如 `gpt-5.5`）
 4. **是否需要需求审视** — 默认开启。需求来源是飞书 PRD 或口述时建议开启；需求已经过充分讨论且边界清晰时可跳过
 5. **是否需要探索阶段** — 仅当需求文档中代码定位不够明确时
 6. **是否需要阶段模型覆盖** — 默认不需要。复杂需求可让 design/review-plan/review-code 使用更强模型，implement/fix 使用默认模型。

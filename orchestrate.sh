@@ -48,7 +48,7 @@ FLOW_TEMPLATE_FILE=""
 FLOW_SCHEMA_VERSION=""
 PROVIDER=""
 PROVIDER_CLI=""
-MODEL="claude-sonnet-4-6"
+MODEL=""
 MODEL_FROM_USER=false
 MODEL_EXPLORE=""
 MODEL_DESIGN=""
@@ -302,6 +302,15 @@ get_phase_model() {
     esac
 }
 
+model_for_state() {
+    local model_value="$1"
+    if [[ -n "$model_value" ]]; then
+        echo "$model_value"
+    else
+        echo "provider-default"
+    fi
+}
+
 validate_flow_manifest() {
     local flow_file="$1"
     "$BIN_DIR/validate-workflow-manifest" "$flow_file"
@@ -460,7 +469,7 @@ Options:
   --workspace <dir>       工作区目录 (默认: <project>/.workflow)
   --flow <file>           flow manifest 模板路径（生成 <workspace>/workflow.json 作为本次运行计划）
   --provider <provider>   Agent provider (claude/codex，默认自动推断)
-  --model <model>         Agent 模型（Claude 默认 claude-sonnet-4-6；Codex 默认读取 ~/.codex/config.toml）
+  --model <model>         Agent 模型（Claude 默认使用 CLI 自身配置；Codex 默认读取 ~/.codex/config.toml）
   --model-explore <model> 探索阶段模型（未指定则继承 --model）
   --model-design <model>  设计阶段模型（未指定则继承 --model）
   --model-review <model>  方案评审阶段模型（未指定则继承 --model）
@@ -660,7 +669,7 @@ elif [[ -n "$FLOW_TEMPLATE_FILE" ]]; then
         --mode shell
         --task-name "$TASK_NAME"
         --provider "$PROVIDER"
-        --model "$MODEL"
+        --model "$(model_for_state "$MODEL")"
     )
     if [[ "$PHASE_EXPLORE" == true ]]; then
         CREATE_FLOW_ARGS+=(--enable explore)
@@ -705,7 +714,7 @@ state_cmd init \
     --workflow-id "$WORKFLOW_ID" \
     --task-name "$TASK_NAME" \
     --provider "$PROVIDER" \
-    --model "$MODEL" \
+    --model "$(model_for_state "$MODEL")" \
     --project-dir "$PROJECT_DIR" \
     --workspace-dir "$WORKSPACE_DIR"
 
@@ -747,7 +756,7 @@ if [[ -n "$FLOW_FILE" ]]; then
 fi
 log_info "Provider: $PROVIDER"
 log_info "CLI:      $PROVIDER_CLI"
-log_info "模型:     $MODEL"
+log_info "模型:     $(model_for_state "$MODEL")"
 for phase in explore design review-plan revise implement review-code fix; do
     phase_model="$(get_phase_model "$phase")"
     if [[ "$phase_model" != "$MODEL" ]]; then
@@ -847,7 +856,7 @@ DONEEOF
         --file "$STATE_FILE" \
         --phase "$phase_name" \
         --provider "$PROVIDER" \
-        --model "$phase_model" \
+        --model "$(model_for_state "$phase_model")" \
         --session-name "$session_name" \
         --output-file "$output_file" \
         --prompt-file "$prompt_file" \
@@ -947,7 +956,7 @@ PROMPTEOF
         --file "$STATE_FILE" \
         --phase "$phase_name" \
         --provider "$PROVIDER" \
-        --model "$phase_model" \
+        --model "$(model_for_state "$phase_model")" \
         --session-name "$session_name" \
         --output-file "$output_file" \
         --prompt-file "$prompt_file" \

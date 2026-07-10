@@ -17,8 +17,8 @@ project_dir: ~/code/your-project
 # Agent provider（可选，默认自动推断；支持 claude 或 codex）
 # provider: claude
 
-# Agent 模型（可选，需与 provider 匹配）
-# Claude Code 示例：
+# Agent 模型（可选，需与 provider 匹配；Claude 未指定时使用 CLI 自身配置）
+# Claude Code 示例（仅示例，可按本机可用模型替换）：
 # model: claude-sonnet-4-6
 # Codex 示例：
 # provider: codex

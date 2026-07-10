@@ -125,7 +125,7 @@ Configuration precedence is: CLI flags > config file > built-in defaults.
 Provider support:
 
 - Use `--provider claude|codex` to select the agent CLI used for phase sessions.
-- Use `--model <model>` to select the model for either provider. Codex defaults to the model in `~/.codex/config.toml` when `--model` is omitted.
+- Use `--model <model>` to select the model for either provider. Claude uses the CLI's configured default when omitted; Codex defaults to the model in `~/.codex/config.toml`.
 - Use phase-specific model overrides when needed: `--model-explore`, `--model-design`, `--model-review`/`--model-review-plan`, `--model-revise`, `--model-implement`, `--model-review-code`, and `--model-fix`. Unspecified phases inherit `--model`.
 - Use `--max-rounds <n>` to cap review/revise and review-code/fix loops. The default is `3`; `--auto` exits with code `2` when a loop is exhausted.
 - Use `--flow <file>` to select the source workflow template. The orchestrator writes the task-specific run workflow to `<workspace>/workflow.json` and records that path in `workflow-state.json`.

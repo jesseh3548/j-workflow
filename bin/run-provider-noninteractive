@@ -11,13 +11,11 @@ def read_text(path):
 
 def build_command(args):
     if args.provider == "claude":
-        return [
+        command = [
             args.provider_cli,
             "-p",
             "--output-format",
             "text",
-            "--model",
-            args.model,
             "--add-dir",
             args.project_dir,
             "--add-dir",
@@ -25,24 +23,28 @@ def build_command(args):
             "--permission-mode",
             "acceptEdits",
             read_text(args.prompt_file),
-        ], None
+        ]
+        if args.model:
+            command[4:4] = ["--model", args.model]
+        return command, None
 
     if args.provider == "codex":
-        return [
+        command = [
             args.provider_cli,
             "exec",
             "--ephemeral",
             "--sandbox",
             "workspace-write",
             "--skip-git-repo-check",
-            "-m",
-            args.model,
             "-C",
             args.project_dir,
             "--add-dir",
             args.workspace_dir,
             "-",
-        ], read_text(args.prompt_file)
+        ]
+        if args.model:
+            command[6:6] = ["-m", args.model]
+        return command, read_text(args.prompt_file)
 
     raise ValueError(f"Unsupported provider: {args.provider}")
 
