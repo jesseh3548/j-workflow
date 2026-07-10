@@ -345,10 +345,14 @@ open_phase_tab "<run_script_path>" "<project_dir>" "<started_marker>"
 
 ### Step 4: 后台轮询等待
 
-仅 Interactive phase 需要后台轮询等待 `workflow-state.json` 中的 phase status。用 Bash `run_in_background: true` 执行轮询脚本：
+仅 Interactive phase 需要后台轮询等待 `workflow-state.json` 中的 phase status。用 Bash `run_in_background: true` 执行轮询脚本。轮询必须周期性提示当前等待的 phase 和手动解锁命令；如果用户配置了 `phase_timeout`，超时后要用 `bin/workflow-state phase-finish` 将 phase 标记为 `failed`、`exit-code 124`，再提示可用 `--resume` 继续。
 
 ```bash
-while [ "$(bin/workflow-state get-phase-status --file "<workspace>/workflow-state.json" --phase "<phase_name>")" = "running" ]; do sleep 5; done
+while [ "$(bin/workflow-state get-phase-status --file "<workspace>/workflow-state.json" --phase "<phase_name>")" = "running" ]; do
+  sleep 5
+  # 每约 5 分钟提示:
+  # bin/workflow-state phase-finish --file "<workspace>/workflow-state.json" --phase "<phase_name>" --status done --exit-code 0 --output-file "<output_file>"
+done
 echo "PHASE_COMPLETE:<phase_name>"
 ```
 

@@ -36,6 +36,9 @@ project_dir: ~/code/your-project
 # Review/Fix 循环最大轮数（可选，默认 3；CLI --max-rounds 会覆盖）
 # max_rounds: 3
 
+# 交互阶段最长等待分钟数（可选，默认 0 = 不超时；CLI --phase-timeout 会覆盖）
+# phase_timeout: 0
+
 # ── 阶段开关 ──
 # true = 启用, false = 跳过
 

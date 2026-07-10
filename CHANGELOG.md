@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Add periodic wait hints and optional `--phase-timeout` / `phase_timeout` for interactive phases so a stuck agent can be manually unlocked or marked failed (WP5 in `docs/plans/refactor-and-manifest-migration.md`).
 - Add shared `bin/archive-workspace` and call it before non-resume runs so existing workspace artifacts are archived to `archive/round-N/` instead of being overwritten (WP4 in `docs/plans/refactor-and-manifest-migration.md`).
 - Stop hardcoding Claude's default model in `orchestrate.sh`; when no model is specified, Claude uses its CLI default and workflow state records `provider-default` (WP12 in `docs/plans/refactor-and-manifest-migration.md`).
 - Replace ambiguous breakpoint `s=skip next phase` handling with explicit `a=accept current result` choices per breakpoint and a uniform `q` resume-safe exit (WP3 in `docs/plans/refactor-and-manifest-migration.md`).

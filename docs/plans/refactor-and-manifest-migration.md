@@ -165,7 +165,7 @@ Phase D（改名，随时可做，建议最后做避免和 C 冲突）:  WP11
 - `--resume`：不触发归档。
 - `bin/validate-workspace-artifacts` 对归档后的 workspace 通过（确认它不把 `archive/` 内文件当违规，如有问题在 validate 脚本中排除 `archive/`）。
 
-### WP5：交互阶段轮询加超时提示与手动解锁指引
+### WP5：交互阶段轮询加超时提示与手动解锁指引 ✅（2026-07-10）
 
 **现状**：`run_phase` 里 `while status == running; do sleep 5; done` 无限等待。agent 忘记执行 `phase-finish`、或用户把 tab 撂着不管时，编排器永远挂起，用户也不知道怎么解锁。
 

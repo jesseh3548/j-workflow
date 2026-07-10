@@ -62,6 +62,7 @@ AUTO_MODE=false
 RESUME_MODE=false
 GHOSTTY_WINDOW_ID=""
 MAX_ROUNDS=3
+PHASE_TIMEOUT_MINUTES=0
 
 # Phase breakpoints (default: semi-auto)
 BP_AFTER_EXPLORE=false
@@ -440,6 +441,7 @@ parse_config() {
             model_review_code) MODEL_REVIEW_CODE="$value" ;;
             model_fix) MODEL_FIX="$value" ;;
             max_rounds) MAX_ROUNDS="$value" ;;
+            phase_timeout) PHASE_TIMEOUT_MINUTES="$value" ;;
             explore) PHASE_EXPLORE="$value" ;;
             design) PHASE_DESIGN="$value" ;;
             review_plan) PHASE_REVIEW_PLAN="$value" ;;
@@ -478,6 +480,7 @@ Options:
   --model-review-code <model> 代码评审阶段模型（未指定则继承 --model）
   --model-fix <model>     代码修复阶段模型（未指定则继承 --model）
   --max-rounds <n>        review/revise 和 review-code/fix 循环最大轮数（默认 3）
+  --phase-timeout <min>   交互阶段最长等待分钟数（默认 0，不超时）
   --explore               启用探索阶段
   --skip <phase>          跳过指定阶段 (explore/design/review/implement/review-code)
   --auto                  全自动模式（无断点）
@@ -543,6 +546,7 @@ while [[ $# -gt 0 ]]; do
         --model-review-code) MODEL_REVIEW_CODE="$2"; shift 2 ;;
         --model-fix) MODEL_FIX="$2"; shift 2 ;;
         --max-rounds) MAX_ROUNDS="$2"; shift 2 ;;
+        --phase-timeout) PHASE_TIMEOUT_MINUTES="$2"; shift 2 ;;
         --explore) PHASE_EXPLORE=true; shift ;;
         --skip)
             case "$2" in
@@ -601,6 +605,10 @@ fi
 
 if ! [[ "$MAX_ROUNDS" =~ ^[0-9]+$ ]]; then
     log_error "--max-rounds 必须是非负整数: $MAX_ROUNDS"
+    exit 1
+fi
+if ! [[ "$PHASE_TIMEOUT_MINUTES" =~ ^[0-9]+$ ]]; then
+    log_error "--phase-timeout 必须是非负整数分钟数: $PHASE_TIMEOUT_MINUTES"
     exit 1
 fi
 
@@ -924,10 +932,41 @@ DONEEOF
     # 等待该阶段完成（轮询 workflow-state.json，而不是 marker 文件）
     log_info "等待 session 完成..."
     local phase_status
+    local wait_iterations=0
+    local waited_seconds=0
+    local timeout_seconds=$((PHASE_TIMEOUT_MINUTES * 60))
     phase_status="$(state_cmd get-phase-status --file "$STATE_FILE" --phase "$phase_name" 2>/dev/null || true)"
     while [[ "$phase_status" == "running" ]]; do
         sleep 5
+        wait_iterations=$((wait_iterations + 1))
+        waited_seconds=$((wait_iterations * 5))
         phase_status="$(state_cmd get-phase-status --file "$STATE_FILE" --phase "$phase_name" 2>/dev/null || true)"
+
+        if [[ "$phase_status" != "running" ]]; then
+            break
+        fi
+
+        if (( timeout_seconds > 0 && waited_seconds >= timeout_seconds )); then
+            state_cmd phase-finish \
+                --file "$STATE_FILE" \
+                --phase "$phase_name" \
+                --status failed \
+                --exit-code 124 \
+                --output-file "$output_file"
+            rm -f "${prompt_file}"
+            log_error "$phase_name 等待超过 ${PHASE_TIMEOUT_MINUTES} 分钟，已标记 failed，exit=124"
+            log_error "修复或确认 agent 状态后可用 --resume 继续。"
+            exit 124
+        fi
+
+        if (( wait_iterations % 60 == 0 )); then
+            local waited_minutes=$((waited_seconds / 60))
+            echo ""
+            echo -e "${YELLOW}[WAIT]${NC} 仍在等待 $phase_name 完成（已等待 ${waited_minutes}m）。"
+            echo "  - 如 agent 已完成但忘了写状态，可手动执行:"
+            echo "    \"$BIN_DIR/workflow-state\" phase-finish --file \"$STATE_FILE\" --phase \"$phase_name\" --status done --exit-code 0 --output-file \"$output_file\""
+            echo "  - 如想放弃该阶段: 将 --status 改为 failed，编排器会退出并保留状态。"
+        fi
     done
 
     local exit_code
