@@ -107,17 +107,32 @@ log_phase() {
 
 wait_for_user() {
     if [[ "$AUTO_MODE" == true ]]; then
+        WAIT_CHOICE="continue"
         return 0
     fi
+    local accept_label="${3:-}"
     echo ""
     echo -e "${YELLOW}[BREAKPOINT]${NC} $1"
     echo -e "  输出文件: ${BOLD}$2${NC}"
     echo ""
-    read -rp "  按 Enter 继续下一阶段, 输入 'q' 退出, 输入 's' 跳过下一阶段: " choice
+    echo "  Enter = 继续推荐路径"
+    if [[ -n "$accept_label" ]]; then
+        echo "  a     = $accept_label"
+    fi
+    echo "  q     = 保存状态并退出（之后可用 --resume）"
+    read -rp "  请选择 [Enter/a/q]: " choice
     case "$choice" in
-        q|Q) echo "已退出。"; exit 0 ;;
-        s|S) return 1 ;;  # signal skip
-        *) return 0 ;;
+        "") WAIT_CHOICE="continue"; return 0 ;;
+        a|A)
+            if [[ -n "$accept_label" ]]; then
+                WAIT_CHOICE="accept"
+                return 0
+            fi
+            log_error "当前断点不支持 a 选项"
+            exit 1
+            ;;
+        q|Q) echo "已退出。可用 --resume 继续。"; exit 0 ;;
+        *) log_error "未知选择: $choice"; exit 1 ;;
     esac
 }
 
@@ -1027,7 +1042,7 @@ if [[ "$PHASE_EXPLORE" == true ]] && ! should_skip_phase "explore" "$EXPLORE_OUT
         "$EXPLORE_OUTPUT" "$DIR_EXPLORE"
 
     if [[ "$BP_AFTER_EXPLORE" == true ]]; then
-        wait_for_user "探索阶段完成，请审阅探索报告" "$EXPLORE_OUTPUT" || PHASE_DESIGN=false
+        wait_for_user "探索阶段完成，请审阅探索报告" "$EXPLORE_OUTPUT"
     fi
 fi
 
@@ -1062,7 +1077,10 @@ if [[ "$PHASE_DESIGN" == true ]] && ! should_skip_phase "design" "$DESIGN_OUTPUT
         "$DESIGN_OUTPUT" "$DIR_DESIGN"
 
     if [[ "$BP_AFTER_DESIGN" == true ]]; then
-        wait_for_user "方案设计完成，请审阅技术方案" "$DESIGN_OUTPUT" || PHASE_REVIEW_PLAN=false
+        wait_for_user "方案设计完成，请审阅技术方案" "$DESIGN_OUTPUT" "跳过方案评审，直接进入实现"
+        if [[ "$WAIT_CHOICE" == "accept" ]]; then
+            PHASE_REVIEW_PLAN=false
+        fi
     fi
 fi
 
@@ -1149,7 +1167,10 @@ if [[ "$PHASE_REVIEW_PLAN" == true && "$REVIEW_ALREADY_PASSED" == false ]]; then
 
         # 断点：让用户看评审结果
         if [[ "$BP_AFTER_REVIEW" == true ]]; then
-            wait_for_user "第${REVIEW_ROUND}轮评审完成，方案需要修正" "$REVIEW_OUTPUT" || { PHASE_IMPLEMENT=false; break; }
+            wait_for_user "第${REVIEW_ROUND}轮评审完成，方案需要修正" "$REVIEW_OUTPUT" "接受当前方案，跳过修正并进入实现"
+            if [[ "$WAIT_CHOICE" == "accept" ]]; then
+                break
+            fi
         fi
 
         # ── Revise ──
@@ -1235,7 +1256,10 @@ if [[ "$PHASE_IMPLEMENT" == true ]] && ! should_skip_phase "implement" "$IMPLEME
         "$IMPLEMENT_OUTPUT" "$DIR_IMPLEMENT"
 
     if [[ "$BP_AFTER_IMPLEMENT" == true ]]; then
-        wait_for_user "实现完成，请审阅实现说明" "$IMPLEMENT_OUTPUT" || PHASE_REVIEW_CODE=false
+        wait_for_user "实现完成，请审阅实现说明" "$IMPLEMENT_OUTPUT" "跳过代码评审，直接结束"
+        if [[ "$WAIT_CHOICE" == "accept" ]]; then
+            PHASE_REVIEW_CODE=false
+        fi
     fi
 fi
 
@@ -1315,7 +1339,10 @@ if [[ "$PHASE_REVIEW_CODE" == true && "$CODE_REVIEW_ALREADY_PASSED" == false ]];
 
         # 断点：让用户看评审结果
         if [[ "$BP_AFTER_REVIEW_CODE" == true ]]; then
-            wait_for_user "第${CODE_REVIEW_ROUND}轮代码评审完成，代码需要修复" "$CODE_REVIEW_OUTPUT" || break
+            wait_for_user "第${CODE_REVIEW_ROUND}轮代码评审完成，代码需要修复" "$CODE_REVIEW_OUTPUT" "接受当前代码，跳过修复并结束评审循环"
+            if [[ "$WAIT_CHOICE" == "accept" ]]; then
+                break
+            fi
         fi
 
         # ── Fix ──

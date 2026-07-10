@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Replace ambiguous breakpoint `s=skip next phase` handling with explicit `a=accept current result` choices per breakpoint and a uniform `q` resume-safe exit (WP3 in `docs/plans/refactor-and-manifest-migration.md`).
 - Add `--max-rounds` / `max_rounds` to cap review/revise and review-code/fix loops, exiting safely in `--auto` mode when a loop is exhausted (WP2 in `docs/plans/refactor-and-manifest-migration.md`).
 - Fix config precedence so explicit CLI flags override values loaded from `.workflow-config.yaml` (WP1 in `docs/plans/refactor-and-manifest-migration.md`).
 - Fix `parse_config` not stripping inline `#` comments, which made the shipped `workflow-config.example.yaml` silently disable all phase toggles and breakpoints (WP0 in `docs/plans/refactor-and-manifest-migration.md`).

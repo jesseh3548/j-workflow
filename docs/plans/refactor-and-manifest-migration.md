@@ -71,7 +71,7 @@ Phase D（改名，随时可做，建议最后做避免和 C 冲突）:  WP11
 - 构造一个永远输出 `VERDICT: NEEDS_REVISION` 的 stub provider（见 WP8 的 fake-provider，可提前建最小版），`--auto --max-rounds 2` 跑到第 3 轮进入前退出，exit code 2，`workflow-state.json` 中 `current_round` 为 2、`loop_exhausted` 已写。
 - 正常 PASS 流程行为不变。
 
-### WP3：断点选项语义统一
+### WP3：断点选项语义统一 ✅（2026-07-10）
 
 **现状**：`wait_for_user` 提供 Enter/q/s 三个选项，`s`（"跳过下一阶段"）在不同位置语义不一致：
 - explore 后 `s` → 只关 design，但 review-plan 仍开着，会去评审不存在的 plan。
