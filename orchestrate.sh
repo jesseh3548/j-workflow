@@ -653,6 +653,40 @@ STATE_FILE="$WORKSPACE_DIR/workflow-state.json"
 RUN_FLOW_FILE="$WORKSPACE_DIR/workflow.json"
 WORKFLOW_ID="$(basename "$PROJECT_DIR")-${TASK_NAME}-$(date +%Y%m%d%H%M%S)"
 
+if [[ "$RESUME_MODE" != true ]]; then
+    if "$BIN_DIR/archive-workspace" --workspace "$WORKSPACE_DIR" --check-only >/dev/null 2>&1; then
+        if [[ "$AUTO_MODE" == true ]]; then
+            archived_to="$("$BIN_DIR/archive-workspace" --workspace "$WORKSPACE_DIR")"
+            log_warn "检测到旧产出，已归档到 $archived_to"
+        else
+            echo ""
+            echo -e "${YELLOW}[EXISTING WORKSPACE]${NC} 检测到旧产出: $WORKSPACE_DIR"
+            echo "  a = 归档旧产出并重新开始"
+            echo "  r = 改用 --resume 续跑现有 workspace"
+            echo "  q = 退出"
+            read -rp "  请选择 [a/r/q]: " archive_choice
+            case "$archive_choice" in
+                a|A)
+                    archived_to="$("$BIN_DIR/archive-workspace" --workspace "$WORKSPACE_DIR")"
+                    log_warn "已归档旧产出到 $archived_to"
+                    ;;
+                r|R)
+                    RESUME_MODE=true
+                    log_info "切换为续跑模式，将复用现有 workspace"
+                    ;;
+                q|Q)
+                    echo "已退出。"
+                    exit 0
+                    ;;
+                *)
+                    log_error "未知选择: $archive_choice"
+                    exit 1
+                    ;;
+            esac
+        fi
+    fi
+fi
+
 # Create workspace and phase directories
 mkdir -p "$WORKSPACE_DIR" "$DIR_EXPLORE" "$DIR_DESIGN" "$DIR_REVIEW" "$DIR_IMPLEMENT" "$DIR_REVIEW_CODE"
 

@@ -129,7 +129,7 @@ Phase D（改名，随时可做，建议最后做避免和 C 冲突）:  WP11
 
 ## Phase B：共享能力补齐
 
-### WP4：orchestrate.sh 接入归档逻辑（双入口共享）
+### WP4：orchestrate.sh 接入归档逻辑（双入口共享） ✅（2026-07-10）
 
 **现状**：`workflow/SKILL.md` Phase 0.4 强制"发现旧产出先归档到 `archive/round-N/` 再清空"，逻辑以内联 bash 写在 skill 文档里；`orchestrate.sh` 完全没有归档，同名任务重跑会覆盖 `requirement.md` 并在旧产物上继续写。
 

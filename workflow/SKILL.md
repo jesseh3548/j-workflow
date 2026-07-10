@@ -167,41 +167,21 @@ Codex 兼容规则：如果当前 Codex 运行环境没有可用的 Agent tool�
 
 **第一步（强制）：检查旧产出并归档**
 
-在创建或写入任何文件之前，必须先检查 workspace 是否已存在产出：
+在创建或写入任何文件之前，必须先检查 workspace 是否已存在产出。不要在 skill 中重新实现归档逻辑；统一调用共享脚本：
 
 ```bash
-# 检查 workspace 是否已存在
-ls <project>/.workflow/<需求名>/design/plan.md 2>/dev/null
-ls <project>/.workflow/<需求名>/review/review.md 2>/dev/null
-ls <project>/.workflow/<需求名>/implement/impl-notes.md 2>/dev/null
+# 检查是否已有旧产出
+bin/archive-workspace --workspace "<workspace>" --check-only
+
+# 如需归档并清空当前工作目录
+bin/archive-workspace --workspace "<workspace>"
 ```
 
-如果任意产出文件已存在：
-1. 确定当前是第几轮（检查 `archive/round-*` 目录数量，+1 即为当前轮次）
-2. 将所有阶段目录中的文件复制到 `archive/round-N/` 下（保留目录结构）
-3. 将当前 `requirement.md` 也归档
-4. 清空所有阶段工作目录
-5. 告知用户："检测到旧产出，已归档到 archive/round-N/"
-
-```bash
-# 归档示例
-WORKSPACE="<project>/.workflow/<需求名>"
-N=$(ls -d "$WORKSPACE/archive/round-"* 2>/dev/null | wc -l | tr -d ' ')
-N=$((N + 1))
-mkdir -p "$WORKSPACE/archive/round-$N"/{requirement-review,design,review,implement,review-code,verify-observability,explore}
-cp "$WORKSPACE/requirement-review/"* "$WORKSPACE/archive/round-$N/requirement-review/" 2>/dev/null
-cp "$WORKSPACE/design/"* "$WORKSPACE/archive/round-$N/design/" 2>/dev/null
-cp "$WORKSPACE/review/"* "$WORKSPACE/archive/round-$N/review/" 2>/dev/null
-cp "$WORKSPACE/implement/"* "$WORKSPACE/archive/round-$N/implement/" 2>/dev/null
-cp "$WORKSPACE/review-code/"* "$WORKSPACE/archive/round-$N/review-code/" 2>/dev/null
-cp "$WORKSPACE/verify-observability/"* "$WORKSPACE/archive/round-$N/verify-observability/" 2>/dev/null
-cp "$WORKSPACE/explore/"* "$WORKSPACE/archive/round-$N/explore/" 2>/dev/null
-cp "$WORKSPACE/requirement.md" "$WORKSPACE/archive/round-$N/" 2>/dev/null
-# 清空工作目录
-rm -f "$WORKSPACE/requirement-review/"* "$WORKSPACE/design/"* "$WORKSPACE/review/"* "$WORKSPACE/implement/"* "$WORKSPACE/review-code/"* "$WORKSPACE/verify-observability/"* "$WORKSPACE/explore/"*
-```
-
-如果无旧产出，跳过此步。
+行为约定：
+- `--check-only` 检测到旧产出时输出 `has-artifacts` 并 exit 0；没有旧产出时 exit 1。
+- 默认模式会归档 `requirement-review/`、`explore/`、`design/`、`review/`、`implement/`、`review-code/`、`verify-observability/`、`requirement.md`、`idea.txt`、`workflow.json`、`workflow-state.json` 到 `archive/round-N/`，然后清空当前阶段目录和 workspace 根的 run workflow/state。
+- `--resume` 或用户明确要求续跑时，不要归档。
+- 需求中途变更重入时，同样调用该脚本归档旧 run，再生成新的 workspace `workflow.json` 和 `workflow-state.json`。
 
 **第二步：创建目录结构并复制需求文档**
 

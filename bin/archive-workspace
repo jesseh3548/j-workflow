@@ -1,0 +1,87 @@
+#!/bin/bash
+set -euo pipefail
+
+WORKSPACE=""
+CHECK_ONLY=false
+
+usage() {
+    cat <<'EOF'
+usage: archive-workspace --workspace <dir> [--check-only]
+
+Detect and archive existing j-workflow artifacts.
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --workspace) WORKSPACE="$2"; shift 2 ;;
+        --check-only) CHECK_ONLY=true; shift ;;
+        -h|--help) usage; exit 0 ;;
+        *) echo "[ERROR] unknown argument: $1" >&2; usage; exit 2 ;;
+    esac
+done
+
+if [[ -z "$WORKSPACE" ]]; then
+    echo "[ERROR] --workspace is required" >&2
+    exit 2
+fi
+
+has_artifacts() {
+    local workspace="$1"
+    local path
+    for path in \
+        "$workspace/design/plan.md" \
+        "$workspace/review/review.md" \
+        "$workspace/implement/impl-notes.md" \
+        "$workspace/review-code/code-review.md" \
+        "$workspace/requirement-review/requirement-review.md"; do
+        if [[ -e "$path" ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+if ! has_artifacts "$WORKSPACE"; then
+    if [[ "$CHECK_ONLY" == true ]]; then
+        exit 1
+    fi
+    exit 0
+fi
+
+if [[ "$CHECK_ONLY" == true ]]; then
+    echo "has-artifacts"
+    exit 0
+fi
+
+round_count=0
+if [[ -d "$WORKSPACE/archive" ]]; then
+    round_count="$(find "$WORKSPACE/archive" -maxdepth 1 -type d -name 'round-*' 2>/dev/null | wc -l | tr -d ' ')"
+fi
+round=$((round_count + 1))
+archive_dir="$WORKSPACE/archive/round-$round"
+
+mkdir -p "$archive_dir"
+
+for dir in requirement-review explore design review implement review-code verify-observability; do
+    if [[ -d "$WORKSPACE/$dir" ]]; then
+        mkdir -p "$archive_dir/$dir"
+        cp -R "$WORKSPACE/$dir/." "$archive_dir/$dir/" 2>/dev/null || true
+    fi
+done
+
+for file in requirement.md idea.txt workflow.json workflow-state.json; do
+    if [[ -e "$WORKSPACE/$file" ]]; then
+        cp "$WORKSPACE/$file" "$archive_dir/$file"
+    fi
+done
+
+for dir in requirement-review explore design review implement review-code verify-observability; do
+    if [[ -d "$WORKSPACE/$dir" ]]; then
+        find "$WORKSPACE/$dir" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+    fi
+done
+
+rm -f "$WORKSPACE/workflow.json" "$WORKSPACE/workflow-state.json"
+
+echo "$archive_dir"
