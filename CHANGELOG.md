@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Fix `parse_config` not stripping inline `#` comments, which made the shipped `workflow-config.example.yaml` silently disable all phase toggles and breakpoints (WP0 in `docs/plans/refactor-and-manifest-migration.md`).
+- Add `docs/plans/refactor-and-manifest-migration.md`: executable work packages for bug fixes (CLI-over-config precedence, review-loop round caps, breakpoint semantics), shared capabilities (workspace archiving, poll-timeout hints, state-driven resume), full manifest-driven migration of `orchestrate.sh`, and the `/workflow` → `/jflow` skill rename.
 - Fix Ghostty phase run scripts failing with `claude: command not found` / `codex: command not found` when the CLI executable is not available in the non-interactive shell PATH. The orchestrator now resolves Claude Code/Codex to an absolute executable path up front and writes that path into generated run scripts.
 - Add `CLAUDE_BIN` / `CODEX_BIN` override support for non-standard CLI install locations.
 - Start Ghostty phases through a temporary no-space launcher script instead of `bash <run_script>`, avoiding Chinese IME conversion of `bash` and Ghostty command argument parsing failures.

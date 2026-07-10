@@ -373,7 +373,8 @@ parse_config() {
     while IFS=': ' read -r key value; do
         # Skip comments and empty lines
         [[ -z "$key" || "$key" == \#* ]] && continue
-        # Trim whitespace
+        # Strip inline comments, then trim whitespace
+        value="${value%%#*}"
         value="${value#"${value%%[![:space:]]*}"}"
         value="${value%"${value##*[![:space:]]}"}"
 
