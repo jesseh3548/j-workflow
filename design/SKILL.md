@@ -14,6 +14,7 @@ allowed-tools: ["Read", "Glob", "Grep", "Bash", "Agent", "Write", "Skill", "AskU
 1. **嵌合现有系统** — 优先复用已有能力，不重复造轮子
 2. **工程评估必须有** — 每个方案都必须包含性能、数据量级、可观测性评估
 3. **先理解再设计** — 在出方案前，必须充分阅读相关模块的代码
+4. **交付文件自足** — 下游 implement/review-code 只能依赖 `plan.md` 和从 plan 派生的核对索引；所有设计结论、用户决策、实现约束都必须写进 `plan.md`
 
 ## 输入
 
@@ -32,7 +33,9 @@ allowed-tools: ["Read", "Glob", "Grep", "Bash", "Agent", "Write", "Skill", "AskU
 
 ### Step 2: 探索现有系统
 
-用 Agent tool 派发 Explore subagent，并行探索：
+用结构化代码探索现有系统。优先使用 CodeGraph / Grep / Glob / Read 直接定位；如 provider 支持轻量探索子 agent，可按需用于代码定位和摘录，但不要强制指定 Claude 原生 Explore subagent。
+
+需要探索：
 - 需求涉及的模块代码结构
 - 已有的类似功能或可复用组件
 - 现有的数据模型
@@ -101,11 +104,13 @@ allowed-tools: ["Read", "Glob", "Grep", "Bash", "Agent", "Write", "Skill", "AskU
 - 每个文件的修改要点（新增/修改/删除什么）
 - 修改顺序建议（先改哪个后改哪个）
 - 需要特别注意的现有代码约束（如某个方法被多处调用，改动需谨慎）
+- 对每个实现项说明它对应的方案章节、业务规则或用户决策，避免 implement agent 只能看到“改什么”却看不到“为什么”
 
 #### 3.9 风险和待确认项
 - 已知风险及应对方案
 - 需要进一步确认的事项
 - 如果有分批/分阶段实施，标注每个批次依赖哪些前置条件（阻塞项、DDL、配置），哪些批次可以并行不受阻塞
+- 用户已确认忽略或暂缓的事项必须写清楚，避免后续 agent 误以为遗漏
 
 #### 3.10 实施评估
 - **改动清单**：按优化项/功能点列出每个改动涉及的文件、改动类型（新增/修改）、预估行数
@@ -114,9 +119,72 @@ allowed-tools: ["Read", "Glob", "Grep", "Bash", "Agent", "Write", "Skill", "AskU
 - **总工时预估**：给出乐观/悲观范围，分"实现"和"测试"两列
 - **批次依赖矩阵**（如有分批）：明确每个批次依赖哪些阻塞项，哪些可以先行
 
+#### 3.11 设计决策记录
+
+必须记录所有会影响实现的关键决策，尤其是与用户交互确认过的内容：
+- 决策点是什么
+- 最终选择是什么
+- 为什么选择它
+- 被放弃的备选方案是什么
+- 影响哪些章节、接口、数据模型、流程、测试或可观测性
+
+格式：
+
+```markdown
+| # | 决策点 | 最终结论 | 理由 | 放弃的选项 | 影响范围 |
+|---|--------|----------|------|------------|----------|
+```
+
 ### Step 4: 输出
 
-将方案写入 workspace/plan.md（或指定路径）。
+将方案写入 workspace/plan.md（或指定路径）。`plan.md` 是唯一权威设计与实现依据，必须完整到让一个全新的 implement agent 不依赖历史对话即可实现。
+
+`plan.md` 交付完整性要求：
+- 必须包含所有用户明确确认过的选择、边界、暂缓项和忽略项；不得只留在对话上下文里。
+- 必须把用户重点关注的问题落到对应设计章节，例如性能关注落到性能评估，灰度/风险关注落到风险和上线策略，兼容性关注落到核心流程和测试。
+- 必须精确到可实现：涉及文件、类、方法、接口、字段、配置、状态、指标、测试的地方，不能只写抽象方向。
+- 必须说明跨仓库/跨模块/上下游 contract 的对齐点，包括 producer、consumer、字段/枚举/状态/错误码/配置 key/metric tag 必须一致的内容。
+- 如果需求仍有未决问题，必须写入「风险和待确认项」并说明它阻塞哪些实现项；不能让 implement 阶段自行猜测。
+- 如果与用户在设计过程中确认了新结论、边界、取舍或修正，必须立即回写到 plan.md 对应章节；最终给出完成说明前，再通读一遍确认产出文件已反映最新结论。
+
+如果上下文参数提供了 `implementation-brief.md` / 实现核对索引输出路径，或 workflow 要求产出 `design/implementation-brief.md`，在完成 `plan.md` 后再从 `plan.md` 派生一份实现核对索引。该文件不是第二份设计文档，不能引入 plan 外的新决策。
+
+`implementation-brief.md` 格式：
+
+```markdown
+# Implementation Brief
+
+## 1. Objective
+## 2. Non-goals
+## 3. Required Changes
+| ID | Plan Section | Repo | File | Symbol | Change | Why | Verification |
+## 4. Contract Changes
+### API / Proto
+### DB / Entity / Mapper
+### Enum / Status
+### Config / Job / MQ / Metrics
+## 5. Cross-repo Sync Points
+| Contract | Plan Section | Producer | Consumer | Must Match |
+## 6. Edge Cases
+## 7. Tests Required
+| Test | Plan Section | Repo | Scenario | Expected |
+## 8. Review Checklist
+```
+
+生成规则：
+- 先完成并通读 `plan.md`，再生成 brief。
+- brief 的每一项都必须填写 `Plan Section`，能追溯到 plan 的具体章节。
+- brief 只抽取实现必须处理的点：Required Changes、Contract Changes、Cross-repo Sync Points、Edge Cases、Tests Required。
+- 不要把设计解释、方案取舍、背景说明复制进 brief；这些只保留在 plan。
+- 如果生成 brief 时发现某个实现点只能写在 brief、无法在 plan 中找到依据，必须先回到 plan 对应章节补全，再更新 brief。
+- 输出前做覆盖校验：从 plan 的数据模型、接口设计、核心流程、配置/任务/MQ、可观测性、测试章节提取实现项，确认 brief 无遗漏且无 plan 外内容。
+
+输出前必须做 design 交付自检，并在 `plan.md` 末尾写入「交付自检」小节：
+- 用户交互决策是否全部写入 plan
+- 实现指引是否精确到文件/类/方法/配置/测试
+- 跨模块 contract 是否列全并对齐
+- implementation-brief 是否完全由 plan 派生，且无 plan 外内容
+- 新 implement agent 是否可以只读 plan + brief 独立开始实现
 
 ## 方案修改规范
 
@@ -129,6 +197,7 @@ allowed-tools: ["Read", "Glob", "Grep", "Bash", "Agent", "Write", "Skill", "AskU
    - 没有前后矛盾的描述
    - 没有残留的旧版本内容
    - 章节间的引用关系一致
+   - 如存在 implementation-brief.md，同步更新并确认 brief 每项都能回链到 plan，且没有 plan 外内容
 
 ## 决策确认规则
 

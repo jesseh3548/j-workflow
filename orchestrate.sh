@@ -43,11 +43,21 @@ EXPLORE_IDEA=""
 TASK_NAME=""
 WORKSPACE_DIR=""
 CONFIG_FILE=""
+FLOW_FILE=""
+FLOW_TEMPLATE_FILE=""
+FLOW_SCHEMA_VERSION=""
 PROVIDER=""
 PROVIDER_CLI=""
 PROVIDER_FROM_CLI=false
 MODEL="claude-sonnet-4-6"
 MODEL_FROM_USER=false
+MODEL_EXPLORE=""
+MODEL_DESIGN=""
+MODEL_REVIEW=""
+MODEL_REVISE=""
+MODEL_IMPLEMENT=""
+MODEL_REVIEW_CODE=""
+MODEL_FIX=""
 SKIP_PHASES=()
 AUTO_MODE=false
 RESUME_MODE=false
@@ -205,20 +215,8 @@ detect_ghostty_window() {
     if [[ -n "$GHOSTTY_WINDOW_ID" ]]; then
         return
     fi
-    if ! command -v osascript >/dev/null 2>&1; then
-        return
-    fi
-    GHOSTTY_WINDOW_ID="$(osascript -e '
-        tell application "Ghostty"
-            if (count of windows) > 0 then
-                return id of window 1
-            else
-                return "not_found"
-            end if
-        end tell
-    ' 2>/dev/null || echo "not_found")"
-    if [[ "$GHOSTTY_WINDOW_ID" == "not_found" ]]; then
-        GHOSTTY_WINDOW_ID=""
+    GHOSTTY_WINDOW_ID="$("$BIN_DIR/detect-ghostty-window" 2>/dev/null || true)"
+    if [[ -z "$GHOSTTY_WINDOW_ID" ]]; then
         log_warn "无法检测 Ghostty 当前窗口，新阶段可能 fallback 到新窗口"
     fi
 }
@@ -230,6 +228,138 @@ state_cmd() {
 get_phase_session_id() {
     local phase_name="$1"
     state_cmd get-session-id --file "$STATE_FILE" --phase "$phase_name" 2>/dev/null || true
+}
+
+get_phase_model() {
+    local phase_name="$1"
+    local model_key=""
+
+    if [[ -n "${FLOW_FILE:-}" && -f "${FLOW_FILE:-}" ]]; then
+        model_key="$("$BIN_DIR/workflow-manifest" phase-get --file "$FLOW_FILE" --phase "$phase_name" --field model_key 2>/dev/null || true)"
+    fi
+
+    if [[ -z "$model_key" ]]; then
+        case "$phase_name" in
+            explore) model_key="model_explore" ;;
+            design) model_key="model_design" ;;
+            review|review-plan) model_key="model_review" ;;
+            revise) model_key="model_revise" ;;
+            implement) model_key="model_implement" ;;
+            review-code) model_key="model_review_code" ;;
+            fix) model_key="model_fix" ;;
+            *) model_key="model" ;;
+        esac
+    fi
+
+    case "$model_key" in
+        model_explore) echo "${MODEL_EXPLORE:-$MODEL}" ;;
+        model_design) echo "${MODEL_DESIGN:-$MODEL}" ;;
+        model_review|model_review_plan) echo "${MODEL_REVIEW:-$MODEL}" ;;
+        model_revise) echo "${MODEL_REVISE:-$MODEL}" ;;
+        model_implement) echo "${MODEL_IMPLEMENT:-$MODEL}" ;;
+        model_review_code) echo "${MODEL_REVIEW_CODE:-$MODEL}" ;;
+        model_fix) echo "${MODEL_FIX:-$MODEL}" ;;
+        model|*) echo "$MODEL" ;;
+    esac
+}
+
+validate_flow_manifest() {
+    local flow_file="$1"
+    "$BIN_DIR/validate-workflow-manifest" "$flow_file"
+}
+
+validate_workflow_state() {
+    "$BIN_DIR/validate-workflow-state" "$STATE_FILE" >/dev/null
+}
+
+validate_workspace_artifacts() {
+    if [[ -z "${FLOW_FILE:-}" || ! -f "${FLOW_FILE:-}" ]]; then
+        return 0
+    fi
+    if "$BIN_DIR/validate-workspace-artifacts" --manifest "$FLOW_FILE" --workspace "$WORKSPACE_DIR" >/dev/null; then
+        state_cmd set-workflow-meta --file "$STATE_FILE" --key artifact_validation_status --value "pass"
+    else
+        state_cmd set-workflow-meta --file "$STATE_FILE" --key artifact_validation_status --value "failed"
+        return 1
+    fi
+    state_cmd set-workflow-meta --file "$STATE_FILE" --key last_artifact_validation --value "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+}
+
+validate_phase_artifact() {
+    local artifact_kind="$1"
+    local file="$2"
+    local verdicts=""
+
+    case "$artifact_kind" in
+        review-plan) verdicts="PASS,NEEDS_REVISION" ;;
+        review-code) verdicts="PASS,NEEDS_FIX" ;;
+        requirement-review) verdicts="PASS,NEEDS_CLARIFICATION" ;;
+        observability-report) verdicts="PASS,NEEDS_FIX" ;;
+    esac
+
+    if [[ -n "${FLOW_FILE:-}" && -f "${FLOW_FILE:-}" ]]; then
+        "$BIN_DIR/validate-artifact" --kind "$artifact_kind" --phase "$artifact_kind" --file "$file" --manifest "$FLOW_FILE" --verdicts "$verdicts"
+    else
+        "$BIN_DIR/validate-artifact" --kind "$artifact_kind" --file "$file" --verdicts "$verdicts"
+    fi
+}
+
+render_phase_template() {
+    local phase_id="$1"
+    local field="$2"
+    local phase_name="$3"
+    local phase_dir="$4"
+
+    if [[ -n "${FLOW_FILE:-}" && -f "${FLOW_FILE:-}" ]]; then
+        "$BIN_DIR/workflow-manifest" render-template \
+            --file "$FLOW_FILE" \
+            --phase "$phase_id" \
+            --field "$field" \
+            --var "project_dir=$PROJECT_DIR" \
+            --var "workspace_dir=$WORKSPACE_DIR" \
+            --var "task_name=$TASK_NAME" \
+            --var "phase_id=$phase_id" \
+            --var "phase_name=$phase_name" \
+            --var "phase_dir=$phase_dir"
+        return
+    fi
+
+    case "$field" in
+        prompt_file_template) echo "${phase_dir}/${phase_name}.prompt" ;;
+        run_script_template) echo "${phase_dir}/${phase_name}.run.sh" ;;
+        started_marker_template) echo "${phase_dir}/${phase_name}.started" ;;
+        *) return 1 ;;
+    esac
+}
+
+phase_artifact_path() {
+    local phase_id="$1"
+    local artifact_kind="$2"
+    local round="${3:-}"
+    local relative_path
+
+    if [[ -n "${FLOW_FILE:-}" && -f "${FLOW_FILE:-}" ]]; then
+        relative_path="$("$BIN_DIR/workflow-manifest" artifact \
+            --file "$FLOW_FILE" \
+            --phase "$phase_id" \
+            --kind "$artifact_kind" \
+            --var "round=$round")"
+        echo "$WORKSPACE_DIR/$relative_path"
+        return
+    fi
+
+    return 1
+}
+
+artifact_verdict_is_pass() {
+    local file="$1"
+    "$BIN_DIR/workflow-manifest" is-pass --artifact "$file" 2>/dev/null
+}
+
+phase_transition_for_artifact() {
+    local phase_id="$1"
+    local file="$2"
+    "$BIN_DIR/workflow-manifest" transition --file "$FLOW_FILE" --phase "$phase_id" --artifact "$file"
 }
 
 parse_config() {
@@ -250,12 +380,20 @@ parse_config() {
         case "$key" in
             project_dir) PROJECT_DIR="$value" ;;
             workspace_dir) WORKSPACE_DIR="$value" ;;
+            flow_file) FLOW_FILE="$value" ;;
             provider)
                 if [[ "$PROVIDER_FROM_CLI" != true ]]; then
                     PROVIDER="$value"
                 fi
                 ;;
             model) MODEL="$value"; MODEL_FROM_USER=true ;;
+            model_explore) MODEL_EXPLORE="$value" ;;
+            model_design) MODEL_DESIGN="$value" ;;
+            model_review|model_review_plan) MODEL_REVIEW="$value" ;;
+            model_revise) MODEL_REVISE="$value" ;;
+            model_implement) MODEL_IMPLEMENT="$value" ;;
+            model_review_code) MODEL_REVIEW_CODE="$value" ;;
+            model_fix) MODEL_FIX="$value" ;;
             explore) PHASE_EXPLORE="$value" ;;
             design) PHASE_DESIGN="$value" ;;
             review_plan) PHASE_REVIEW_PLAN="$value" ;;
@@ -283,8 +421,16 @@ Options:
   --idea <text>           探索阶段的想法/方向（一句话即可）
   --config <file>         配置文件路径 (.workflow-config.yaml)
   --workspace <dir>       工作区目录 (默认: <project>/.workflow)
+  --flow <file>           flow manifest 模板路径（生成 <workspace>/workflow.json 作为本次运行计划）
   --provider <provider>   Agent provider (claude/codex，默认自动推断)
   --model <model>         Agent 模型（Claude 默认 claude-sonnet-4-6；Codex 默认读取 ~/.codex/config.toml）
+  --model-explore <model> 探索阶段模型（未指定则继承 --model）
+  --model-design <model>  设计阶段模型（未指定则继承 --model）
+  --model-review <model>  方案评审阶段模型（未指定则继承 --model）
+  --model-revise <model>  方案修正阶段模型（未指定则继承 --model）
+  --model-implement <model> 实现阶段模型（未指定则继承 --model）
+  --model-review-code <model> 代码评审阶段模型（未指定则继承 --model）
+  --model-fix <model>     代码修复阶段模型（未指定则继承 --model）
   --explore               启用探索阶段
   --skip <phase>          跳过指定阶段 (explore/design/review/implement/review-code)
   --auto                  全自动模式（无断点）
@@ -323,8 +469,16 @@ while [[ $# -gt 0 ]]; do
         --name) TASK_NAME="$2"; shift 2 ;;
         --config) CONFIG_FILE="$2"; shift 2 ;;
         --workspace) WORKSPACE_DIR="$2"; shift 2 ;;
+        --flow) FLOW_FILE="$2"; shift 2 ;;
         --provider) PROVIDER="$2"; PROVIDER_FROM_CLI=true; shift 2 ;;
         --model) MODEL="$2"; MODEL_FROM_USER=true; shift 2 ;;
+        --model-explore) MODEL_EXPLORE="$2"; shift 2 ;;
+        --model-design) MODEL_DESIGN="$2"; shift 2 ;;
+        --model-review|--model-review-plan) MODEL_REVIEW="$2"; shift 2 ;;
+        --model-revise) MODEL_REVISE="$2"; shift 2 ;;
+        --model-implement) MODEL_IMPLEMENT="$2"; shift 2 ;;
+        --model-review-code) MODEL_REVIEW_CODE="$2"; shift 2 ;;
+        --model-fix) MODEL_FIX="$2"; shift 2 ;;
         --explore) PHASE_EXPLORE=true; shift ;;
         --skip)
             case "$2" in
@@ -404,6 +558,20 @@ if [[ -n "$REQUIREMENT_FILE" ]]; then
     REQUIREMENT_FILE="$(cd "$(dirname "$REQUIREMENT_FILE")" && pwd)/$(basename "$REQUIREMENT_FILE")"
 fi
 
+if [[ -z "$FLOW_FILE" && -f "$SCRIPT_DIR/workflow.json" ]]; then
+    FLOW_TEMPLATE_FILE="$SCRIPT_DIR/workflow.json"
+else
+    FLOW_TEMPLATE_FILE="$FLOW_FILE"
+fi
+if [[ -n "$FLOW_TEMPLATE_FILE" ]]; then
+    if [[ ! -f "$FLOW_TEMPLATE_FILE" ]]; then
+        log_error "flow manifest 不存在: $FLOW_TEMPLATE_FILE"
+        exit 1
+    fi
+    FLOW_TEMPLATE_FILE="$(cd "$(dirname "$FLOW_TEMPLATE_FILE")" && pwd)/$(basename "$FLOW_TEMPLATE_FILE")"
+    validate_flow_manifest "$FLOW_TEMPLATE_FILE" >/dev/null
+fi
+
 if [[ -z "$WORKSPACE_DIR" ]]; then
     WORKSPACE_DIR="$PROJECT_DIR/.workflow"
 fi
@@ -418,10 +586,64 @@ DIR_REVIEW="$WORKSPACE_DIR/review"
 DIR_IMPLEMENT="$WORKSPACE_DIR/implement"
 DIR_REVIEW_CODE="$WORKSPACE_DIR/review-code"
 STATE_FILE="$WORKSPACE_DIR/workflow-state.json"
+RUN_FLOW_FILE="$WORKSPACE_DIR/workflow.json"
 WORKFLOW_ID="$(basename "$PROJECT_DIR")-${TASK_NAME}-$(date +%Y%m%d%H%M%S)"
 
 # Create workspace and phase directories
 mkdir -p "$WORKSPACE_DIR" "$DIR_EXPLORE" "$DIR_DESIGN" "$DIR_REVIEW" "$DIR_IMPLEMENT" "$DIR_REVIEW_CODE"
+
+if [[ "$RESUME_MODE" == true && -f "$RUN_FLOW_FILE" ]]; then
+    FLOW_FILE="$RUN_FLOW_FILE"
+    FLOW_SCHEMA_VERSION="$(validate_flow_manifest "$FLOW_FILE")"
+elif [[ -n "$FLOW_TEMPLATE_FILE" && "$FLOW_TEMPLATE_FILE" == "$RUN_FLOW_FILE" ]]; then
+    FLOW_FILE="$RUN_FLOW_FILE"
+    FLOW_SCHEMA_VERSION="$(validate_flow_manifest "$FLOW_FILE")"
+elif [[ -n "$FLOW_TEMPLATE_FILE" ]]; then
+    CREATE_FLOW_ARGS=(
+        --template "$FLOW_TEMPLATE_FILE"
+        --output "$RUN_FLOW_FILE"
+        --mode shell
+        --task-name "$TASK_NAME"
+        --provider "$PROVIDER"
+        --model "$MODEL"
+    )
+    if [[ "$PHASE_EXPLORE" == true ]]; then
+        CREATE_FLOW_ARGS+=(--enable explore)
+    else
+        CREATE_FLOW_ARGS+=(--disable explore)
+    fi
+    if [[ "$PHASE_DESIGN" != true ]]; then
+        CREATE_FLOW_ARGS+=(--disable design --disable review-plan --disable revise)
+    elif [[ "$PHASE_REVIEW_PLAN" != true ]]; then
+        CREATE_FLOW_ARGS+=(--disable review-plan --disable revise)
+    fi
+    if [[ "$PHASE_IMPLEMENT" != true ]]; then
+        CREATE_FLOW_ARGS+=(--disable implement)
+    fi
+    if [[ "$PHASE_REVIEW_CODE" != true ]]; then
+        CREATE_FLOW_ARGS+=(--disable review-code --disable fix)
+    fi
+    "$BIN_DIR/create-workflow-run" "${CREATE_FLOW_ARGS[@]}" >/dev/null
+    FLOW_FILE="$RUN_FLOW_FILE"
+    FLOW_SCHEMA_VERSION="$(validate_flow_manifest "$FLOW_FILE")"
+fi
+
+if [[ -n "$FLOW_FILE" ]]; then
+    PHASE_EXPLORE=false
+    PHASE_DESIGN=false
+    PHASE_REVIEW_PLAN=false
+    PHASE_IMPLEMENT=false
+    PHASE_REVIEW_CODE=false
+    while IFS= read -r phase_id; do
+        case "$phase_id" in
+            explore) PHASE_EXPLORE=true ;;
+            design) PHASE_DESIGN=true ;;
+            review-plan) PHASE_REVIEW_PLAN=true ;;
+            implement) PHASE_IMPLEMENT=true ;;
+            review-code) PHASE_REVIEW_CODE=true ;;
+        esac
+    done < <("$BIN_DIR/workflow-manifest" execution-order --file "$FLOW_FILE" --kind order)
+fi
 
 state_cmd init \
     --file "$STATE_FILE" \
@@ -431,6 +653,14 @@ state_cmd init \
     --model "$MODEL" \
     --project-dir "$PROJECT_DIR" \
     --workspace-dir "$WORKSPACE_DIR"
+
+if [[ -n "$FLOW_FILE" ]]; then
+    state_cmd set-workflow-meta --file "$STATE_FILE" --key flow_file --value "$FLOW_FILE"
+    state_cmd set-workflow-meta --file "$STATE_FILE" --key flow_schema_version --value "$FLOW_SCHEMA_VERSION"
+    state_cmd set-workflow-meta --file "$STATE_FILE" --key source_manifest --value "$FLOW_TEMPLATE_FILE"
+fi
+validate_workflow_state
+validate_workspace_artifacts
 
 # Copy requirement to workspace root (if provided)
 if [[ -n "$REQUIREMENT_FILE" ]]; then
@@ -457,13 +687,23 @@ if [[ -n "$EXPLORE_IDEA" ]]; then
     log_info "探索想法: $EXPLORE_IDEA"
 fi
 log_info "工作区:   $WORKSPACE_DIR"
+if [[ -n "$FLOW_FILE" ]]; then
+    log_info "Flow:     $FLOW_FILE (schema v${FLOW_SCHEMA_VERSION})"
+fi
 log_info "Provider: $PROVIDER"
 log_info "CLI:      $PROVIDER_CLI"
 log_info "模型:     $MODEL"
+for phase in explore design review-plan revise implement review-code fix; do
+    phase_model="$(get_phase_model "$phase")"
+    if [[ "$phase_model" != "$MODEL" ]]; then
+        log_info "模型覆盖: $phase=$phase_model"
+    fi
+done
 log_info "自动模式: $AUTO_MODE"
 detect_ghostty_window
 if [[ -n "$GHOSTTY_WINDOW_ID" ]]; then
     log_info "Ghostty 窗口: $GHOSTTY_WINDOW_ID"
+    state_cmd set-workflow-meta --file "$STATE_FILE" --key ghostty_window_id --value "$GHOSTTY_WINDOW_ID"
 fi
 if [[ "$RESUME_MODE" == true ]]; then
     log_info "续跑模式: 已有产出的阶段将被跳过"
@@ -506,112 +746,47 @@ run_phase() {
     log_info "输出文件: $output_file"
 
     # 阶段模型：优先用阶段专属模型，fallback 到全局
-    local phase_model="$MODEL"
+    local phase_model
+    phase_model="$(get_phase_model "$skill_name")"
 
     # 将 prompt 写入临时文件，避免命令行长度限制和转义问题
-    local prompt_file="${log_dir}/${phase_name}.prompt"
+    local prompt_file
+    prompt_file="$(render_phase_template "$skill_name" "prompt_file_template" "$phase_name" "$log_dir")"
     echo "$prompt" > "$prompt_file"
 
-    # 在 prompt 末尾追加完成标记指令
-    # agent 完成任务后询问用户确认，用户确认后写 .done，编排器检测到后推进下一阶段
-    local done_marker="${log_dir}/${phase_name}.done"
+    # 在 prompt 末尾追加完成状态指令。
+    # agent 完成任务后询问用户确认，用户确认后写 workflow-state.json，编排器检测到后推进下一阶段。
     cat >> "$prompt_file" << DONEEOF
 
 重要：当你完成上述所有任务后，请告知用户你已完成，并列出你的产出文件路径，请用户审阅。
-当用户确认可以继续后（例如回复"ok"、"继续"、"下一步"等），运行以下 bash 命令写入完成标记：
-echo "0" > "${done_marker}"
-这个标记用于通知编排器推进到下一阶段。在用户明确确认之前，不要写入该标记。
+如果你和用户交流后，最终结论、边界、取舍或修正有任何变化，必须先把这些变化回写到上述产出文件对应章节，再结束对话。
+当用户确认可以继续后（例如回复"ok"、"继续"、"下一步"等），运行以下 bash 命令写入阶段完成状态：
+"$BIN_DIR/workflow-state" phase-finish --file "$STATE_FILE" --phase "$phase_name" --status done --exit-code 0 --output-file "$output_file"
+这个状态用于通知编排器推进到下一阶段。在用户明确确认之前，不要写入完成状态。
 DONEEOF
 
     # 构建在新 tab 中执行的脚本
-    local started_marker="${log_dir}/${phase_name}.started"
-    local run_script="${log_dir}/${phase_name}.run.sh"
+    local started_marker
+    local run_script
+    started_marker="$(render_phase_template "$skill_name" "started_marker_template" "$phase_name" "$log_dir")"
+    run_script="$(render_phase_template "$skill_name" "run_script_template" "$phase_name" "$log_dir")"
     local phase_started_epoch
     phase_started_epoch="$(date +%s)"
-    # 捕获当前环境中 claude 需要的认证和配置变量
-    local env_exports=""
-    for var in ANTHROPIC_AUTH_TOKEN ANTHROPIC_API_KEY ANTHROPIC_BEDROCK_BASE_URL \
-               ANTHROPIC_MODEL ANTHROPIC_SMALL_FAST_MODEL \
-               CLAUDE_CODE_USE_BEDROCK CLAUDE_CODE_SKIP_BEDROCK_AUTH CLAUDE_CODE_USE_VERTEX \
-               OPENAI_API_KEY CODEX_HOME \
-               AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_REGION \
-               HOME; do
-        if [[ -n "${!var:-}" ]]; then
-            env_exports="${env_exports}export ${var}='${!var}'
-"
-        fi
-    done
-
-    cat > "$run_script" << RUNEOF
-#!/bin/bash
-export NODE_TLS_REJECT_UNAUTHORIZED=0
-export PATH="/opt/homebrew/bin:/usr/local/bin:\$HOME/.local/bin:\$PATH"
-swift -e 'import Carbon; let s = TISCreateInputSourceList([kTISPropertyInputSourceID: "com.apple.keylayout.ABC" as CFString] as CFDictionary, false)!.takeRetainedValue() as! [TISInputSource]; if let i = s.first { TISSelectInputSource(i) }' 2>/dev/null || true
-${env_exports}
-cd "$PROJECT_DIR"
-# 写启动标记（用于验证 tab 打开成功）
-echo "\$\$" > "${started_marker}"
-echo -e "\033[1;36m════════════════════════════════════════\033[0m"
-echo -e "\033[1;36m  Session: ${session_name}\033[0m"
-echo -e "\033[1;36m  Provider:${PROVIDER}\033[0m"
-echo -e "\033[1;36m  CLI:     ${PROVIDER_CLI}\033[0m"
-echo -e "\033[1;36m  Model:   ${phase_model}\033[0m"
-echo -e "\033[1;36m  Project: ${PROJECT_DIR}\033[0m"
-echo -e "\033[1;36m════════════════════════════════════════\033[0m"
-echo ""
-# agent 在前台运行，保持完整的 tty 连接
-# 用户确认后 agent 写 .done，编排器检测到即推进下一阶段
-if [[ "${PROVIDER}" == "claude" ]]; then
-    if [[ -n "${resume_session_id}" ]]; then
-        "${PROVIDER_CLI}" \\
-            --model "$phase_model" \\
-            --session-id "${resume_session_id}" \\
-            --add-dir "$PROJECT_DIR" \\
-            --permission-mode default \\
-            --verbose \\
-            -- "\$(cat '${prompt_file}')"
-    elif [[ -n "${resume_session_name}" ]]; then
-        "${PROVIDER_CLI}" \\
-            --model "$phase_model" \\
-            --add-dir "$PROJECT_DIR" \\
-            --permission-mode default \\
-            --verbose \\
-            --resume "${resume_session_name}" \\
-            -- "\$(cat '${prompt_file}')"
-    else
-        "${PROVIDER_CLI}" \\
-            --model "$phase_model" \\
-            --name "$session_name" \\
-            --add-dir "$PROJECT_DIR" \\
-            --permission-mode default \\
-            --verbose \\
-            -- "\$(cat '${prompt_file}')"
-    fi
-elif [[ "${PROVIDER}" == "codex" ]]; then
-    if [[ -n "${resume_session_id}" ]]; then
-        "${PROVIDER_CLI}" resume \\
-            -m "$phase_model" \\
-            -C "$PROJECT_DIR" \\
-            "${resume_session_id}" \\
-            "\$(cat '${prompt_file}')"
-    else
-        "${PROVIDER_CLI}" \\
-            -m "$phase_model" \\
-            -C "$PROJECT_DIR" \\
-            "\$(cat '${prompt_file}')"
-    fi
-else
-    echo "Unsupported provider: ${PROVIDER}" >&2
-    exit 2
-fi
-EXIT_CODE=\$?
-
-# 如果 agent 没有写 .done（比如用户手动退出 claude），由脚本兜底写入
-if [[ ! -f "${done_marker}" ]]; then
-    echo "\$EXIT_CODE" > "${done_marker}"
-fi
-RUNEOF
-    chmod +x "$run_script"
+    "$BIN_DIR/render-phase-run-script" \
+        --output "$run_script" \
+        --provider "$PROVIDER" \
+        --provider-cli "$PROVIDER_CLI" \
+        --model "$phase_model" \
+        --project-dir "$PROJECT_DIR" \
+        --session-name "$session_name" \
+        --prompt-file "$prompt_file" \
+        --started-marker "$started_marker" \
+        --workflow-state "$BIN_DIR/workflow-state" \
+        --state-file "$STATE_FILE" \
+        --phase "$phase_name" \
+        --output-file "$output_file" \
+        --resume-session-id "$resume_session_id" \
+        --resume-session-name "$resume_session_name"
 
     state_cmd phase-start \
         --file "$STATE_FILE" \
@@ -623,6 +798,7 @@ RUNEOF
         --prompt-file "$prompt_file" \
         --run-script "$run_script" \
         --started-epoch "$phase_started_epoch"
+    state_cmd set-workflow-meta --file "$STATE_FILE" --key current_phase --value "$phase_name"
 
     # 在当前 Ghostty 窗口中打开新 tab 执行脚本
     rm -f "$started_marker"
@@ -647,32 +823,125 @@ RUNEOF
         fi
     fi
 
-    # 等待该阶段完成（轮询 .done 标记文件）
+    # 等待该阶段完成（轮询 workflow-state.json，而不是 marker 文件）
     log_info "等待 session 完成..."
-    while [[ ! -f "${log_dir}/${phase_name}.done" ]]; do
+    local phase_status
+    phase_status="$(state_cmd get-phase-status --file "$STATE_FILE" --phase "$phase_name" 2>/dev/null || true)"
+    while [[ "$phase_status" == "running" ]]; do
         sleep 5
+        phase_status="$(state_cmd get-phase-status --file "$STATE_FILE" --phase "$phase_name" 2>/dev/null || true)"
     done
 
     local exit_code
-    exit_code=$(cat "${log_dir}/${phase_name}.done")
-    rm -f "${log_dir}/${phase_name}.done" "${prompt_file}"
+    exit_code="$(state_cmd get-phase-field --file "$STATE_FILE" --phase "$phase_name" --key exit_code 2>/dev/null || true)"
+    exit_code="${exit_code:-1}"
+    rm -f "${prompt_file}"
+
+    if [[ "$phase_status" != "done" && "$phase_status" != "skipped" ]]; then
+        log_error "$phase_name 失败，exit=${exit_code}"
+        exit 1
+    fi
+    state_cmd set-workflow-meta --file "$STATE_FILE" --key last_finished_phase --value "$phase_name"
+
+    if [[ -f "$output_file" ]]; then
+        if ! validate_phase_artifact "$skill_name" "$output_file"; then
+            log_error "$phase_name 的产物未通过内容校验，请先修订 $output_file"
+            exit 1
+        fi
+        if ! validate_workspace_artifacts; then
+            log_error "$phase_name 完成后 workspace 产物命名/指针校验失败，请修订 $WORKSPACE_DIR"
+            exit 1
+        fi
+        log_success "$phase_name 完成 → $output_file"
+    else
+        log_warn "$phase_name 完成，但输出文件未生成，请检查 ${log_dir}/${phase_name}.log"
+    fi
+}
+
+run_analysis_phase() {
+    local phase_name="$1"
+    local skill_name="$2"
+    local prompt="$3"
+    local output_file="$4"
+    local log_dir="$5"
+
+    local session_name="${TASK_NAME}-${phase_name}"
+    local phase_model
+    phase_model="$(get_phase_model "$skill_name")"
+    local prompt_file="${log_dir}/${phase_name}.prompt"
+    local log_file="${log_dir}/${phase_name}.log"
+    local phase_started_epoch
+    phase_started_epoch="$(date +%s)"
+
+    log_info "启动 analysis phase: $phase_name"
+    log_info "Provider: $PROVIDER"
+    log_info "输出文件: $output_file"
+
+    cat > "$prompt_file" << PROMPTEOF
+$prompt
+
+重要：这是非交互 analysis phase。
+- 必须直接完成任务并写入指定输出文件：$output_file
+- 不要等待用户确认
+- 不要写 marker 文件或交互完成状态；非交互 runner 会在进程退出后更新 workflow-state.json
+- 不要修改业务代码；除指定报告/验证产物外不要写其他文件
+- 完成后直接退出
+PROMPTEOF
+
+    state_cmd phase-start \
+        --file "$STATE_FILE" \
+        --phase "$phase_name" \
+        --provider "$PROVIDER" \
+        --model "$phase_model" \
+        --session-name "$session_name" \
+        --output-file "$output_file" \
+        --prompt-file "$prompt_file" \
+        --run-script "$log_file" \
+        --started-epoch "$phase_started_epoch"
+    state_cmd set-workflow-meta --file "$STATE_FILE" --key current_phase --value "$phase_name"
+
+    set +e
+    "$BIN_DIR/run-provider-noninteractive" \
+        --provider "$PROVIDER" \
+        --provider-cli "$PROVIDER_CLI" \
+        --model "$phase_model" \
+        --project-dir "$PROJECT_DIR" \
+        --workspace-dir "$WORKSPACE_DIR" \
+        --prompt-file "$prompt_file" \
+        --log-file "$log_file"
+    local exit_code
+    exit_code="$?"
+    set -e
 
     local phase_status="done"
-    if [[ "$exit_code" != "0" ]]; then
+    if [[ "$exit_code" != "0" || ! -f "$output_file" ]]; then
         phase_status="failed"
     fi
+
     state_cmd phase-finish \
         --file "$STATE_FILE" \
         --phase "$phase_name" \
         --status "$phase_status" \
         --exit-code "$exit_code" \
         --output-file "$output_file"
+    state_cmd set-workflow-meta --file "$STATE_FILE" --key last_finished_phase --value "$phase_name"
 
-    if [[ -f "$output_file" ]]; then
-        log_success "$phase_name 完成 → $output_file"
-    else
-        log_warn "$phase_name 完成，但输出文件未生成，请检查 ${log_dir}/${phase_name}.log"
+    rm -f "$prompt_file"
+
+    if [[ "$phase_status" != "done" ]]; then
+        log_error "$phase_name analysis phase 失败，exit=${exit_code}，日志: $log_file"
+        if [[ -f "$log_file" ]]; then
+            tail -80 "$log_file" || true
+        fi
+        exit 1
     fi
+
+    if ! validate_phase_artifact "$skill_name" "$output_file"; then
+        log_error "$phase_name 的产物未通过内容校验，请先修订 $output_file"
+        exit 1
+    fi
+
+    log_success "$phase_name 完成 → $output_file"
 }
 
 # Resume 检查：如果产出文件已存在，跳过该阶段
@@ -695,7 +964,8 @@ should_skip_phase() {
 
 # ── Phase 1: Explore ──
 
-if [[ "$PHASE_EXPLORE" == true ]] && ! should_skip_phase "explore" "$DIR_EXPLORE/exploration.md"; then
+EXPLORE_OUTPUT="$(phase_artifact_path "explore" "primary")"
+if [[ "$PHASE_EXPLORE" == true ]] && ! should_skip_phase "explore" "$EXPLORE_OUTPUT"; then
     log_phase 1 "需求探索 (/explore)"
 
     # 确定探索输入：优先用 idea，其次用 requirement
@@ -712,18 +982,19 @@ if [[ "$PHASE_EXPLORE" == true ]] && ! should_skip_phase "explore" "$DIR_EXPLORE
 上下文参数：
 - 探索输入：${EXPLORE_INPUT}
 - 项目路径：$PROJECT_DIR
-- 报告输出路径：$DIR_EXPLORE/exploration.md
+- 报告输出路径：$EXPLORE_OUTPUT
 - 如果探索过程中发现需求可以被细化，也将细化后的需求描述写入 $WORKSPACE_DIR/requirement.md" \
-        "$DIR_EXPLORE/exploration.md" "$DIR_EXPLORE"
+        "$EXPLORE_OUTPUT" "$DIR_EXPLORE"
 
     if [[ "$BP_AFTER_EXPLORE" == true ]]; then
-        wait_for_user "探索阶段完成，请审阅探索报告" "$DIR_EXPLORE/exploration.md" || PHASE_DESIGN=false
+        wait_for_user "探索阶段完成，请审阅探索报告" "$EXPLORE_OUTPUT" || PHASE_DESIGN=false
     fi
 fi
 
 # ── Phase 2: Design ──
 
-if [[ "$PHASE_DESIGN" == true ]] && ! should_skip_phase "design" "$DIR_DESIGN/plan.md"; then
+DESIGN_OUTPUT="$(phase_artifact_path "design" "primary")"
+if [[ "$PHASE_DESIGN" == true ]] && ! should_skip_phase "design" "$DESIGN_OUTPUT"; then
     log_phase 2 "方案设计 (/design)"
 
     DESIGN_CONTEXT=""
@@ -737,17 +1008,21 @@ if [[ "$PHASE_DESIGN" == true ]] && ! should_skip_phase "design" "$DIR_DESIGN/pl
 上下文参数：
 - 需求路径：$WORKSPACE_DIR/requirement.md
 - 项目路径：$PROJECT_DIR
-- 方案输出路径：$DIR_DESIGN/plan.md
+- 方案输出路径：$DESIGN_OUTPUT
+- 实现核对索引输出路径：$DIR_DESIGN/implementation-brief.md
 - 补充上下文：${DESIGN_CONTEXT}
 
 额外约束：
+- plan.md 是唯一权威设计与实现依据，必须完整到让新的 implement agent 不依赖历史对话即可实现
+- 所有用户交互确认过的选择、边界、暂缓项、忽略项都必须写入 plan.md 对应章节
 - 对每个改动项，必须明确区分「行为变更」和「结构优化」
 - 对生产在跑的关键路径，默认保留现有行为，除非有明确且充分的理由变更
-- 如果涉及序列化库切换、数据格式变更、协议变更等行为变更，必须逐字段验证兼容性，并在风险章节显式标注" \
-        "$DIR_DESIGN/plan.md" "$DIR_DESIGN"
+- 如果涉及序列化库切换、数据格式变更、协议变更等行为变更，必须逐字段验证兼容性，并在风险章节显式标注
+- 除 plan.md 外，必须生成 implementation-brief.md，作为从 plan.md 派生的实现核对索引。brief 控制在约 150-250 行，必须包含 Objective、Non-goals、Required Changes（ID/Plan Section/Repo/File/Symbol/Change/Why/Verification）、Contract Changes、Cross-repo Sync Points、Edge Cases、Tests Required、Review Checklist；brief 不得包含 plan 外设计" \
+        "$DESIGN_OUTPUT" "$DIR_DESIGN"
 
     if [[ "$BP_AFTER_DESIGN" == true ]]; then
-        wait_for_user "方案设计完成，请审阅技术方案" "$DIR_DESIGN/plan.md" || PHASE_REVIEW_PLAN=false
+        wait_for_user "方案设计完成，请审阅技术方案" "$DESIGN_OUTPUT" || PHASE_REVIEW_PLAN=false
     fi
 fi
 
@@ -755,9 +1030,10 @@ fi
 # 评审 → 修正 → 再评审，循环直到 VERDICT: PASS
 
 REVIEW_ROUND=0
+REVIEW_LATEST="$(phase_artifact_path "review-plan" "latest")"
 
 REVIEW_ALREADY_PASSED=false
-if [[ "$RESUME_MODE" == true && -f "$DIR_REVIEW/review.md" ]] && grep -q "VERDICT: PASS" "$DIR_REVIEW/review.md" 2>/dev/null; then
+if [[ "$RESUME_MODE" == true && -f "$REVIEW_LATEST" ]] && artifact_verdict_is_pass "$REVIEW_LATEST"; then
     log_info "跳过 review（已有 VERDICT: PASS）"
     REVIEW_ALREADY_PASSED=true
 fi
@@ -765,45 +1041,68 @@ fi
 if [[ "$PHASE_REVIEW_PLAN" == true && "$REVIEW_ALREADY_PASSED" == false ]]; then
     while true; do
         REVIEW_ROUND=$((REVIEW_ROUND + 1))
+        state_cmd set-workflow-meta --file "$STATE_FILE" --key current_loop --value "design-review"
+        state_cmd set-workflow-meta --file "$STATE_FILE" --key current_round --value "$REVIEW_ROUND"
+        REVIEW_OUTPUT="$(phase_artifact_path "review-plan" "primary" "$REVIEW_ROUND")"
+        REVISE_OUTPUT="$(phase_artifact_path "revise" "primary" "$REVIEW_ROUND")"
+        PLAN_ROUND_OUTPUT="$DIR_DESIGN/plan-r${REVIEW_ROUND}.md"
 
         log_phase "3" "方案评审 第${REVIEW_ROUND}轮 (/review-plan)"
 
         # 构建评审上下文：第 2 轮起告知评审者这是复审
         REVIEW_CONTEXT=""
         if [[ $REVIEW_ROUND -gt 1 ]]; then
-            REVIEW_CONTEXT="这是第${REVIEW_ROUND}轮评审。上一轮评审报告在 $DIR_REVIEW/review-r$((REVIEW_ROUND-1)).md，方案修正说明在 $DIR_REVIEW/revise-notes-r$((REVIEW_ROUND-1)).md。请重点验证上轮提出的问题是否已修正到位，同时检查修正是否引入新问题。"
+            PREV_REVIEW_OUTPUT="$(phase_artifact_path "review-plan" "primary" "$((REVIEW_ROUND-1))")"
+            PREV_REVISE_OUTPUT="$(phase_artifact_path "revise" "primary" "$((REVIEW_ROUND-1))")"
+            REVIEW_CONTEXT="这是第${REVIEW_ROUND}轮评审。上一轮评审报告在 $PREV_REVIEW_OUTPUT，方案修正说明在 $PREV_REVISE_OUTPUT。请重点验证上轮提出的问题是否已修正到位，同时检查修正是否引入新问题。"
         fi
 
-        run_phase "review-plan-r${REVIEW_ROUND}" "review-plan" \
+        run_analysis_phase "review-plan-r${REVIEW_ROUND}" "review-plan" \
             "调用 /review-plan skill。
 
 上下文参数：
 - 方案路径：$DIR_DESIGN/plan.md
+- 实现核对索引路径：$DIR_DESIGN/implementation-brief.md
 - 项目路径：$PROJECT_DIR
-- 报告输出路径：$DIR_REVIEW/review-r${REVIEW_ROUND}.md
+- 报告输出路径：$REVIEW_OUTPUT
 - 评审上下文：${REVIEW_CONTEXT}
 
 额外关注：
+- plan.md 是唯一权威设计与实现依据，implementation-brief.md 只是从 plan 派生的核对索引
+- 必须检查 plan 是否足够让新 implement agent 独立实现，并检查 brief 是否完整覆盖 plan 且没有 plan 外内容
+- 必须提取并验证方案隐含假设：对 plan 中关于现有代码行为、复用点、异常传播、配置/枚举/状态存在性的描述逐条读源码验证
 - 方案中标注为「行为变更」的改动，必须逐字段验证兼容性
 - 如果方案没有区分行为变更和结构优化，这本身就是一个问题
 
 最后必须给出一行总体裁决（这一行会被自动解析，格式必须严格）：
 - 如果所有项都通过：VERDICT: PASS
 - 如果有任何项需要修改：VERDICT: NEEDS_REVISION" \
-            "$DIR_REVIEW/review-r${REVIEW_ROUND}.md" "$DIR_REVIEW"
+            "$REVIEW_OUTPUT" "$DIR_REVIEW"
 
         # 保持 review.md 始终指向最新版
-        cp "$DIR_REVIEW/review-r${REVIEW_ROUND}.md" "$DIR_REVIEW/review.md" 2>/dev/null || true
+        cp "$REVIEW_OUTPUT" "$REVIEW_LATEST" 2>/dev/null || true
+        if ! validate_workspace_artifacts; then
+            log_error "review-plan 完成后 workspace 产物命名/指针校验失败，请修订 $WORKSPACE_DIR"
+            exit 1
+        fi
 
         # 检查评审结论
-        if grep -q "VERDICT: PASS" "$DIR_REVIEW/review-r${REVIEW_ROUND}.md" 2>/dev/null; then
+        REVIEW_TRANSITION="$(phase_transition_for_artifact "review-plan" "$REVIEW_OUTPUT")"
+        state_cmd set-phase-field --file "$STATE_FILE" --phase "review-plan-r${REVIEW_ROUND}" --key round --value "$REVIEW_ROUND"
+        state_cmd set-phase-field --file "$STATE_FILE" --phase "review-plan-r${REVIEW_ROUND}" --key loop --value "design-review"
+        state_cmd set-phase-field --file "$STATE_FILE" --phase "review-plan-r${REVIEW_ROUND}" --key transition --value "$REVIEW_TRANSITION"
+        if [[ "$REVIEW_TRANSITION" == "continue" ]]; then
             log_success "方案评审通过（第${REVIEW_ROUND}轮）"
             break
+        fi
+        if [[ "$REVIEW_TRANSITION" != "revise" ]]; then
+            log_error "未知 review-plan transition: $REVIEW_TRANSITION"
+            exit 1
         fi
 
         # 断点：让用户看评审结果
         if [[ "$BP_AFTER_REVIEW" == true ]]; then
-            wait_for_user "第${REVIEW_ROUND}轮评审完成，方案需要修正" "$DIR_REVIEW/review-r${REVIEW_ROUND}.md" || { PHASE_IMPLEMENT=false; break; }
+            wait_for_user "第${REVIEW_ROUND}轮评审完成，方案需要修正" "$REVIEW_OUTPUT" || { PHASE_IMPLEMENT=false; break; }
         fi
 
         # ── Revise ──
@@ -811,14 +1110,15 @@ if [[ "$PHASE_REVIEW_PLAN" == true && "$REVIEW_ALREADY_PASSED" == false ]]; then
 
         REVISE_CONTEXT=""
         if [[ $REVIEW_ROUND -gt 1 ]]; then
-            REVISE_CONTEXT="这是第${REVIEW_ROUND}轮修正。上一轮修正说明在 $DIR_REVIEW/revise-notes-r$((REVIEW_ROUND-1)).md。"
+            PREV_REVISE_OUTPUT="$(phase_artifact_path "revise" "primary" "$((REVIEW_ROUND-1))")"
+            REVISE_CONTEXT="这是第${REVIEW_ROUND}轮修正。上一轮修正说明在 $PREV_REVISE_OUTPUT。"
         fi
 
         # revise 续接 design session（同一个 agent 修正自己的方案）
         run_phase "revise-r${REVIEW_ROUND}" "revise" \
             "评审报告已出，请根据评审反馈修正你的技术方案。
 
-阅读评审报告：$DIR_REVIEW/review.md
+阅读评审报告：$REVIEW_LATEST
 ${REVISE_CONTEXT}
 
 在 $PROJECT_DIR 项目中验证评审意见是否正确（自己读代码确认）。
@@ -829,21 +1129,26 @@ ${REVISE_CONTEXT}
 - 评审建议合理但不在本次范围的：记录到风险章节
 
 修正方式：
-- 先执行 cp $DIR_DESIGN/plan.md $DIR_DESIGN/plan-r${REVIEW_ROUND}.md，在 plan-r${REVIEW_ROUND}.md 上修改
-- 就地修改对应章节，禁止在文件末尾追加修正说明章节。plan-r${REVIEW_ROUND}.md 必须是一份完整、自洽的方案文档
+- 先执行 cp $DIR_DESIGN/plan.md $PLAN_ROUND_OUTPUT，在 $PLAN_ROUND_OUTPUT 上修改
+- 就地修改对应章节，禁止在文件末尾追加修正说明章节。$PLAN_ROUND_OUTPUT 必须是一份完整、自洽的方案文档
 - 修改任何一处后，检查全文是否有其他章节涉及同一话题（如改了数据模型，流程、性能评估、实现指引中的引用也要同步更新）
 - 用 Edit 工具精确修改具体章节，不要 Write 重写整个文件
-- 所有修改完成后，Read 整个 plan-r${REVIEW_ROUND}.md 通读一遍，确认没有前后矛盾或残留旧内容
+- 所有修改完成后，Read 整个 $PLAN_ROUND_OUTPUT 通读一遍，确认没有前后矛盾或残留旧内容
+- 同步更新 $DIR_DESIGN/implementation-brief.md，确保 Required Changes、Contract Changes、Cross-repo Sync Points、Tests Required 与最新 $PLAN_ROUND_OUTPUT 一致
 
-将修正说明写入 $DIR_REVIEW/revise-notes-r${REVIEW_ROUND}.md，包含：
+将修正说明写入 $REVISE_OUTPUT，包含：
 - 采纳的评审意见及修正内容（标注修改了哪些章节）
 - 未采纳的评审意见及理由
-- 新增的风险项" \
-            "$DIR_REVIEW/revise-notes-r${REVIEW_ROUND}.md" "$DIR_REVIEW" \
+- 新增的风险项
+- implementation-brief.md 的同步更新内容" \
+            "$REVISE_OUTPUT" "$DIR_REVIEW" \
             "design"
+        state_cmd set-phase-field --file "$STATE_FILE" --phase "revise-r${REVIEW_ROUND}" --key round --value "$REVIEW_ROUND"
+        state_cmd set-phase-field --file "$STATE_FILE" --phase "revise-r${REVIEW_ROUND}" --key loop --value "design-review"
+        state_cmd set-phase-field --file "$STATE_FILE" --phase "revise-r${REVIEW_ROUND}" --key resume_from --value "design"
 
         # 保持 plan.md 始终指向最新版
-        cp "$DIR_DESIGN/plan-r${REVIEW_ROUND}.md" "$DIR_DESIGN/plan.md" 2>/dev/null || true
+        cp "$PLAN_ROUND_OUTPUT" "$DIR_DESIGN/plan.md" 2>/dev/null || true
 
         log_success "第${REVIEW_ROUND}轮方案修正完成，进入下一轮评审"
     done
@@ -851,15 +1156,16 @@ fi
 
 # ── Phase 4: Implement ──
 
-if [[ "$PHASE_IMPLEMENT" == true ]] && ! should_skip_phase "implement" "$DIR_IMPLEMENT/impl-notes.md"; then
+IMPLEMENT_OUTPUT="$(phase_artifact_path "implement" "primary")"
+if [[ "$PHASE_IMPLEMENT" == true ]] && ! should_skip_phase "implement" "$IMPLEMENT_OUTPUT"; then
     log_phase 4 "TDD 实现 (/implement)"
 
     IMPL_CONTEXT=""
     if [[ -f "$DIR_REVIEW/review.md" ]]; then
         IMPL_CONTEXT="评审反馈在 $DIR_REVIEW/review.md。"
     fi
-    if [[ -f "$DIR_REVIEW/revise-notes.md" ]]; then
-        IMPL_CONTEXT="${IMPL_CONTEXT}方案修正说明在 $DIR_REVIEW/revise-notes.md，注意哪些评审意见已被采纳。"
+    if [[ -n "${REVISE_OUTPUT:-}" && -f "$REVISE_OUTPUT" ]]; then
+        IMPL_CONTEXT="${IMPL_CONTEXT}方案修正说明在 $REVISE_OUTPUT，注意哪些评审意见已被采纳。"
     fi
 
     run_phase "implement" "implement" \
@@ -867,13 +1173,22 @@ if [[ "$PHASE_IMPLEMENT" == true ]] && ! should_skip_phase "implement" "$DIR_IMP
 
 上下文参数：
 - 方案路径：$DIR_DESIGN/plan.md
+- 实现核对索引路径：$DIR_DESIGN/implementation-brief.md
 - 项目路径：$PROJECT_DIR
-- 输出路径：$DIR_IMPLEMENT/impl-notes.md
-- 实现上下文：${IMPL_CONTEXT}" \
-        "$DIR_IMPLEMENT/impl-notes.md" "$DIR_IMPLEMENT"
+- 输出路径：$IMPLEMENT_OUTPUT
+- 实现上下文：${IMPL_CONTEXT}
+
+执行规则：
+- 先读完整 plan.md，再读 implementation-brief.md
+- plan.md 是唯一权威设计与实现依据；implementation-brief.md 只作为从 plan 派生的核对索引
+- 如 brief 与 plan 冲突，或 brief 提到 plan 中不存在的要求，不要按 brief 自行改代码；在 impl-notes.md 标记 BLOCKED: brief/plan mismatch，并暂停让编排器回到 design/revise 修设计产物
+- 按 plan 追溯并实现 brief 的 Required Changes，每条在 impl-notes.md 标记 DONE / SKIPPED / BLOCKED
+- 不依赖历史对话；所有必须上下文来自文件
+- 读代码时先定位 diff hunk/符号，再读小窗口，避免全量读取大文件" \
+        "$IMPLEMENT_OUTPUT" "$DIR_IMPLEMENT"
 
     if [[ "$BP_AFTER_IMPLEMENT" == true ]]; then
-        wait_for_user "实现完成，请审阅实现说明" "$DIR_IMPLEMENT/impl-notes.md" || PHASE_REVIEW_CODE=false
+        wait_for_user "实现完成，请审阅实现说明" "$IMPLEMENT_OUTPUT" || PHASE_REVIEW_CODE=false
     fi
 fi
 
@@ -881,9 +1196,10 @@ fi
 # 代码评审 → 修复 → 再评审，循环直到 VERDICT: PASS
 
 CODE_REVIEW_ROUND=0
+CODE_REVIEW_LATEST="$(phase_artifact_path "review-code" "latest")"
 
 CODE_REVIEW_ALREADY_PASSED=false
-if [[ "$RESUME_MODE" == true && -f "$DIR_REVIEW_CODE/code-review.md" ]] && grep -q "VERDICT: PASS" "$DIR_REVIEW_CODE/code-review.md" 2>/dev/null; then
+if [[ "$RESUME_MODE" == true && -f "$CODE_REVIEW_LATEST" ]] && artifact_verdict_is_pass "$CODE_REVIEW_LATEST"; then
     log_info "跳过 review-code（已有 VERDICT: PASS）"
     CODE_REVIEW_ALREADY_PASSED=true
 fi
@@ -891,42 +1207,61 @@ fi
 if [[ "$PHASE_REVIEW_CODE" == true && "$CODE_REVIEW_ALREADY_PASSED" == false ]]; then
     while true; do
         CODE_REVIEW_ROUND=$((CODE_REVIEW_ROUND + 1))
+        state_cmd set-workflow-meta --file "$STATE_FILE" --key current_loop --value "code-review-fix"
+        state_cmd set-workflow-meta --file "$STATE_FILE" --key current_round --value "$CODE_REVIEW_ROUND"
+        CODE_REVIEW_OUTPUT="$(phase_artifact_path "review-code" "primary" "$CODE_REVIEW_ROUND")"
+        FIX_OUTPUT="$(phase_artifact_path "fix" "primary" "$CODE_REVIEW_ROUND")"
 
         log_phase "5" "代码评审 第${CODE_REVIEW_ROUND}轮 (/review-code)"
 
         # 构建评审上下文：第 2 轮起告知评审者这是复审
         CODE_REVIEW_CONTEXT=""
         if [[ $CODE_REVIEW_ROUND -gt 1 ]]; then
-            CODE_REVIEW_CONTEXT="这是第${CODE_REVIEW_ROUND}轮代码评审。上一轮评审报告在 $DIR_REVIEW_CODE/code-review-r$((CODE_REVIEW_ROUND-1)).md，修复说明在 $DIR_REVIEW_CODE/fix-notes-r$((CODE_REVIEW_ROUND-1)).md。请重点验证上轮提出的必须修改项是否已修复到位，同时检查修复是否引入新问题。"
+            PREV_CODE_REVIEW_OUTPUT="$(phase_artifact_path "review-code" "primary" "$((CODE_REVIEW_ROUND-1))")"
+            PREV_FIX_OUTPUT="$(phase_artifact_path "fix" "primary" "$((CODE_REVIEW_ROUND-1))")"
+            CODE_REVIEW_CONTEXT="这是第${CODE_REVIEW_ROUND}轮代码评审。上一轮评审报告在 $PREV_CODE_REVIEW_OUTPUT，修复说明在 $PREV_FIX_OUTPUT。请重点验证上轮提出的必须修改项是否已修复到位，同时检查修复是否引入新问题。"
         fi
 
-        run_phase "review-code-r${CODE_REVIEW_ROUND}" "review-code" \
+        run_analysis_phase "review-code-r${CODE_REVIEW_ROUND}" "review-code" \
             "调用 /review-code skill（对照方案模式）。
 
 上下文参数：
 - 方案路径：$DIR_DESIGN/plan.md
+- 实现核对索引路径：$DIR_DESIGN/implementation-brief.md
 - 项目路径：$PROJECT_DIR
-- 报告输出路径：$DIR_REVIEW_CODE/code-review-r${CODE_REVIEW_ROUND}.md
-- 审查要求：不要只看 diff；必须从变更点扩展到调用方、被调方、测试、配置、数据模型、相似实现，并在报告中写明审查覆盖与缺口。
+- 报告输出路径：$CODE_REVIEW_OUTPUT
+- 审查要求：以 plan.md 为唯一权威依据，implementation-brief.md 只作为核对索引。先读完整 plan.md，再读 implementation-brief.md；不要只看 diff；必须从变更点扩展到调用方、被调方、测试、配置、数据模型、相似实现，并在报告中写明审查覆盖与缺口。必须检查 brief 是否完整覆盖 plan 且没有 plan 外内容。
 - 评审上下文：${CODE_REVIEW_CONTEXT}
 
 最后必须给出一行总体裁决（这一行会被自动解析，格式必须严格）：
 - 如果所有必须修改的问题都已解决或无必须修改项：VERDICT: PASS
 - 如果有必须修改的问题：VERDICT: NEEDS_FIX" \
-            "$DIR_REVIEW_CODE/code-review-r${CODE_REVIEW_ROUND}.md" "$DIR_REVIEW_CODE"
+            "$CODE_REVIEW_OUTPUT" "$DIR_REVIEW_CODE"
 
         # 保持 code-review.md 始终指向最新版
-        cp "$DIR_REVIEW_CODE/code-review-r${CODE_REVIEW_ROUND}.md" "$DIR_REVIEW_CODE/code-review.md" 2>/dev/null || true
+        cp "$CODE_REVIEW_OUTPUT" "$CODE_REVIEW_LATEST" 2>/dev/null || true
+        if ! validate_workspace_artifacts; then
+            log_error "review-code 完成后 workspace 产物命名/指针校验失败，请修订 $WORKSPACE_DIR"
+            exit 1
+        fi
 
         # 检查评审结论
-        if grep -q "VERDICT: PASS" "$DIR_REVIEW_CODE/code-review-r${CODE_REVIEW_ROUND}.md" 2>/dev/null; then
+        CODE_REVIEW_TRANSITION="$(phase_transition_for_artifact "review-code" "$CODE_REVIEW_OUTPUT")"
+        state_cmd set-phase-field --file "$STATE_FILE" --phase "review-code-r${CODE_REVIEW_ROUND}" --key round --value "$CODE_REVIEW_ROUND"
+        state_cmd set-phase-field --file "$STATE_FILE" --phase "review-code-r${CODE_REVIEW_ROUND}" --key loop --value "code-review-fix"
+        state_cmd set-phase-field --file "$STATE_FILE" --phase "review-code-r${CODE_REVIEW_ROUND}" --key transition --value "$CODE_REVIEW_TRANSITION"
+        if [[ "$CODE_REVIEW_TRANSITION" == "continue" ]]; then
             log_success "代码评审通过（第${CODE_REVIEW_ROUND}轮）"
             break
+        fi
+        if [[ "$CODE_REVIEW_TRANSITION" != "fix" ]]; then
+            log_error "未知 review-code transition: $CODE_REVIEW_TRANSITION"
+            exit 1
         fi
 
         # 断点：让用户看评审结果
         if [[ "$BP_AFTER_REVIEW_CODE" == true ]]; then
-            wait_for_user "第${CODE_REVIEW_ROUND}轮代码评审完成，代码需要修复" "$DIR_REVIEW_CODE/code-review-r${CODE_REVIEW_ROUND}.md" || break
+            wait_for_user "第${CODE_REVIEW_ROUND}轮代码评审完成，代码需要修复" "$CODE_REVIEW_OUTPUT" || break
         fi
 
         # ── Fix ──
@@ -934,14 +1269,16 @@ if [[ "$PHASE_REVIEW_CODE" == true && "$CODE_REVIEW_ALREADY_PASSED" == false ]];
 
         FIX_CONTEXT=""
         if [[ $CODE_REVIEW_ROUND -gt 1 ]]; then
-            FIX_CONTEXT="这是第${CODE_REVIEW_ROUND}轮修复。上一轮修复说明在 $DIR_REVIEW_CODE/fix-notes-r$((CODE_REVIEW_ROUND-1)).md。"
+            PREV_FIX_OUTPUT="$(phase_artifact_path "fix" "primary" "$((CODE_REVIEW_ROUND-1))")"
+            FIX_CONTEXT="这是第${CODE_REVIEW_ROUND}轮修复。上一轮修复说明在 $PREV_FIX_OUTPUT。"
         fi
 
         # fix 续接 implement session（同一个 agent 修复自己的代码）
         run_phase "fix-r${CODE_REVIEW_ROUND}" "fix" \
             "代码评审报告已出，请根据评审反馈修复代码问题。
 
-阅读评审报告：$DIR_REVIEW_CODE/code-review.md
+阅读评审报告：$CODE_REVIEW_LATEST
+实现核对索引：$DIR_DESIGN/implementation-brief.md
 ${FIX_CONTEXT}
 
 在 $PROJECT_DIR 项目中修复评审指出的问题。
@@ -950,19 +1287,30 @@ ${FIX_CONTEXT}
 - 「必须修改」的问题：必须修复
 - 评审意见有误的：保留原实现，说明理由
 - 「建议改进」的问题：酌情采纳，不强制
+- 修复或用户确认过程中产生的任何新事实，最终都必须同步回 $DIR_DESIGN/plan.md 对应章节；包括实现细节、异常处理、兼容策略、测试边界、可观测性口径、人工 CR 结论
+- 如果新事实影响 Required Changes、Contract Changes、Cross-repo Sync Points、Edge Cases、Tests Required 或 Review Checklist，同步更新 $DIR_DESIGN/implementation-brief.md，确保 brief 仍完全由 plan 派生
+- 如果当前 fix session 无法安全更新 plan.md，应暂停并让编排器回到 design/revise；不能只把最终事实写在 fix-notes
+- 如果 brief 与 plan 冲突，以 plan.md 为准；不要按 brief 发明新设计。冲突影响修复判断时，暂停让编排器回到 design/revise 修正设计产物
 
 修复后运行与本次变更相关的测试确保通过；如果项目没有测试、测试工具不可用，或本次变更不适合自动化测试，请在修复说明中写明原因和替代验证方式。
 
-将修复说明写入 $DIR_REVIEW_CODE/fix-notes-r${CODE_REVIEW_ROUND}.md，包含：
+将修复说明写入 $FIX_OUTPUT，包含：
 - 已修复的问题及修复内容
 - 未修复的问题及理由
+- plan.md 是否同步更新；如未更新，说明为什么这些变更不影响最终方案事实
+- implementation-brief.md 是否同步更新；如未更新，说明原因
 - 测试运行结果" \
-            "$DIR_REVIEW_CODE/fix-notes-r${CODE_REVIEW_ROUND}.md" "$DIR_REVIEW_CODE" \
+            "$FIX_OUTPUT" "$DIR_REVIEW_CODE" \
             "implement"
+        state_cmd set-phase-field --file "$STATE_FILE" --phase "fix-r${CODE_REVIEW_ROUND}" --key round --value "$CODE_REVIEW_ROUND"
+        state_cmd set-phase-field --file "$STATE_FILE" --phase "fix-r${CODE_REVIEW_ROUND}" --key loop --value "code-review-fix"
+        state_cmd set-phase-field --file "$STATE_FILE" --phase "fix-r${CODE_REVIEW_ROUND}" --key resume_from --value "implement"
 
         log_success "第${CODE_REVIEW_ROUND}轮代码修复完成，进入下一轮评审"
     done
 fi
+validate_workflow_state
+validate_workspace_artifacts
 
 # ============================================================
 # Summary
@@ -981,23 +1329,16 @@ echo "产出文件:"
 for entry in \
     "$WORKSPACE_DIR/requirement.md|requirement.md" \
     "$WORKSPACE_DIR/idea.txt|idea.txt" \
-    "$DIR_EXPLORE/exploration.md|explore/exploration.md" \
-    "$DIR_DESIGN/plan.md|design/plan.md" \
-    "$DIR_REVIEW/review.md|review/review.md" \
-    "$DIR_REVIEW/revise-notes.md|review/revise-notes.md" \
-    "$DIR_IMPLEMENT/impl-notes.md|implement/impl-notes.md" \
-    "$DIR_REVIEW_CODE/code-review.md|review-code/code-review.md"; do
+    "$EXPLORE_OUTPUT|explore/exploration.md" \
+    "$DESIGN_OUTPUT|design/plan.md" \
+    "$DIR_DESIGN/implementation-brief.md|design/implementation-brief.md" \
+    "$REVIEW_LATEST|review/review.md" \
+    "$IMPLEMENT_OUTPUT|implement/impl-notes.md" \
+    "$CODE_REVIEW_LATEST|review-code/code-review.md"; do
     full_path="${entry%%|*}"
     label="${entry##*|}"
     if [[ -f "$full_path" ]]; then
         echo -e "  ${GREEN}✓${NC} ${label}"
-    fi
-done
-
-# 列出评审轮次
-for f in "$DIR_REVIEW"/round-*.md; do
-    if [[ -f "$f" ]]; then
-        echo -e "  ${GREEN}✓${NC} review/$(basename "$f")"
     fi
 done
 

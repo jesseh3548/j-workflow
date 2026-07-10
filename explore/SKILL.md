@@ -31,21 +31,29 @@ allowed-tools: ["Read", "Glob", "Grep", "Bash", "Agent", "Write", "Skill"]
 - 涉及哪些业务领域？
 - 有没有提到的约束？
 
-### Step 2: 并行探索
+### Step 2: Provider-aware 探索
 
-用 Agent tool 派发多个 Explore subagent，并行探索：
+按当前 provider 能力选择探索方式，不要强制某一种子 agent：
 
-**Subagent A: 现有功能扫描**
+- 如果 provider 支持轻量探索子 agent（例如 Claude Code 原生 Explore subagent），可以按需使用它来做代码定位、摘录和搜索。
+- 如果当前环境只有普通 Agent tool，可以派发 bounded exploration 子 agent，但必须限制任务范围和输出。
+- 如果 provider 是 Codex 或没有可用子 agent，不要模拟复杂多 worker 编排，直接使用 `rg`/CodeGraph/Glob/Read 做探索。
+
+无论使用哪种方式，你都是 `/explore` skill 的 coordinator，最终必须自己汇总并写入 `exploration.md`。不要把 Claude 原生 Explore subagent 和本项目 `/explore` skill 混为一谈。
+
+推荐探索维度：
+
+**维度 A: 现有功能扫描**
 - 搜索与需求关键词相关的代码
 - 找出已有的类似功能
 - 记录可复用的类、方法、配置
 
-**Subagent B: 数据模型探索**
+**维度 B: 数据模型探索**
 - 找出相关的数据库表和实体类
 - 理解现有的数据关系
 - 评估是否需要新增/修改表
 
-**Subagent C: 调用链路探索**
+**维度 C: 调用链路探索**
 - 找出相关的 API/RPC 接口
 - 跟踪关键流程的调用链
 - 识别依赖的外部服务

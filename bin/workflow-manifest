@@ -1,0 +1,252 @@
+#!/usr/bin/env python3
+import argparse
+import json
+import sys
+
+
+def load_manifest(path):
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def phase_map(manifest):
+    return {phase["id"]: phase for phase in manifest.get("phases", [])}
+
+
+def resolve_phase_id(manifest, phase_id):
+    aliases = manifest.get("phase_aliases", {})
+    return aliases.get(phase_id, phase_id)
+
+
+def get_phase(manifest, phase_id):
+    resolved = resolve_phase_id(manifest, phase_id)
+    phases = phase_map(manifest)
+    if resolved not in phases:
+        raise KeyError(f"unknown phase: {phase_id}")
+    return phases[resolved]
+
+
+def print_value(value):
+    if value is None:
+        return
+    if isinstance(value, (dict, list, bool, int, float)):
+        print(json.dumps(value, ensure_ascii=False))
+    else:
+        print(value)
+
+
+def parse_vars(items):
+    values = {}
+    for item in items:
+        if "=" not in item:
+            raise ValueError(f"invalid --var item, expected key=value: {item}")
+        key, value = item.split("=", 1)
+        values[key] = value
+    return values
+
+
+def cmd_list_phases(args):
+    manifest = load_manifest(args.file)
+    for phase in manifest.get("phases", []):
+        print(phase["id"])
+
+
+def cmd_phase_exists(args):
+    manifest = load_manifest(args.file)
+    resolved = resolve_phase_id(manifest, args.phase)
+    return 0 if resolved in phase_map(manifest) else 1
+
+
+def cmd_phase_get(args):
+    manifest = load_manifest(args.file)
+    phase = get_phase(manifest, args.phase)
+    if args.field not in phase:
+        return 1
+    print_value(phase[args.field])
+    return 0
+
+
+def cmd_phase_json(args):
+    manifest = load_manifest(args.file)
+    print(json.dumps(get_phase(manifest, args.phase), ensure_ascii=False))
+    return 0
+
+
+def cmd_execution_order(args):
+    manifest = load_manifest(args.file)
+    values = manifest.get("execution", {}).get(args.kind, [])
+    for value in values:
+        print(value)
+    return 0
+
+
+def cmd_render_template(args):
+    manifest = load_manifest(args.file)
+    values = parse_vars(args.var)
+    template = None
+
+    if args.phase:
+        phase = get_phase(manifest, args.phase)
+        template = phase.get(args.field)
+
+    if template is None:
+        template = manifest.get("naming", {}).get(args.field)
+
+    if template is None:
+        raise KeyError(f"unknown template field: {args.field}")
+
+    print(template.format(**values))
+    return 0
+
+
+def render_path(value, values):
+    return value.format(**values)
+
+
+def cmd_artifact(args):
+    manifest = load_manifest(args.file)
+    phase = get_phase(manifest, args.phase)
+    values = parse_vars(args.var)
+    key = args.kind
+
+    if key == "primary":
+        if "output" in phase:
+            print(render_path(phase["output"], values))
+            return 0
+        if "output_pattern" in phase:
+            print(render_path(phase["output_pattern"], values))
+            return 0
+        if "outputs" in phase and phase["outputs"]:
+            print(render_path(phase["outputs"][0], values))
+            return 0
+        return 1
+
+    if key == "latest":
+        if "latest" not in phase:
+            return 1
+        print(render_path(phase["latest"], values))
+        return 0
+
+    if key == "outputs":
+        for output in phase.get("outputs", []):
+            print(render_path(output, values))
+        return 0
+
+    if key == "updates":
+        for output in phase.get("updates", []):
+            print(render_path(output, values))
+        return 0
+
+    raise KeyError(f"unknown artifact kind: {key}")
+
+
+def read_verdict(path):
+    with open(path, "r", encoding="utf-8") as f:
+        lines = f.read().splitlines()
+    for line in reversed(lines):
+        line = line.strip()
+        if line:
+            if line.startswith("VERDICT: "):
+                return line.split("VERDICT: ", 1)[1].strip()
+            return ""
+    return ""
+
+
+def cmd_verdict(args):
+    verdict = read_verdict(args.artifact)
+    if not verdict:
+        return 1
+    print(verdict)
+    return 0
+
+
+def cmd_is_pass(args):
+    verdict = read_verdict(args.artifact)
+    return 0 if verdict == "PASS" else 1
+
+
+def cmd_transition(args):
+    manifest = load_manifest(args.file)
+    phase = get_phase(manifest, args.phase)
+    verdict = read_verdict(args.artifact)
+    if not verdict:
+        return 1
+    target = phase.get("transitions", {}).get(verdict)
+    if not target:
+        return 1
+    print(target)
+    return 0
+
+
+def build_parser():
+    parser = argparse.ArgumentParser(description="Read fields from a j-workflow manifest.")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    p = sub.add_parser("list-phases")
+    p.add_argument("--file", required=True)
+    p.set_defaults(func=cmd_list_phases)
+
+    p = sub.add_parser("phase-exists")
+    p.add_argument("--file", required=True)
+    p.add_argument("--phase", required=True)
+    p.set_defaults(func=cmd_phase_exists)
+
+    p = sub.add_parser("phase-get")
+    p.add_argument("--file", required=True)
+    p.add_argument("--phase", required=True)
+    p.add_argument("--field", required=True)
+    p.set_defaults(func=cmd_phase_get)
+
+    p = sub.add_parser("phase-json")
+    p.add_argument("--file", required=True)
+    p.add_argument("--phase", required=True)
+    p.set_defaults(func=cmd_phase_json)
+
+    p = sub.add_parser("execution-order")
+    p.add_argument("--file", required=True)
+    p.add_argument("--kind", required=True, choices=["order", "skill_order", "shell_order", "shell_excluded", "disabled"])
+    p.set_defaults(func=cmd_execution_order)
+
+    p = sub.add_parser("render-template")
+    p.add_argument("--file", required=True)
+    p.add_argument("--field", required=True)
+    p.add_argument("--phase")
+    p.add_argument("--var", action="append", default=[])
+    p.set_defaults(func=cmd_render_template)
+
+    p = sub.add_parser("artifact")
+    p.add_argument("--file", required=True)
+    p.add_argument("--phase", required=True)
+    p.add_argument("--kind", required=True, choices=["primary", "latest", "outputs", "updates"])
+    p.add_argument("--var", action="append", default=[])
+    p.set_defaults(func=cmd_artifact)
+
+    p = sub.add_parser("verdict")
+    p.add_argument("--artifact", required=True)
+    p.set_defaults(func=cmd_verdict)
+
+    p = sub.add_parser("is-pass")
+    p.add_argument("--artifact", required=True)
+    p.set_defaults(func=cmd_is_pass)
+
+    p = sub.add_parser("transition")
+    p.add_argument("--file", required=True)
+    p.add_argument("--phase", required=True)
+    p.add_argument("--artifact", required=True)
+    p.set_defaults(func=cmd_transition)
+
+    return parser
+
+
+def main():
+    args = build_parser().parse_args()
+    try:
+        result = args.func(args)
+        return 0 if result is None else result
+    except Exception as exc:
+        print(f"[ERROR] workflow-manifest: {exc}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

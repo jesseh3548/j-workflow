@@ -3,6 +3,9 @@
 Related:
 - Main README: [`../../README.md`](../../README.md)
 - Changelog: [`../../CHANGELOG.md`](../../CHANGELOG.md)
+- Current short backlog: [`../../TODO.md`](../../TODO.md)
+
+> This document keeps historical analysis and implementation notes. Check `TODO.md` first before treating older "仍需跟进" entries as current work.
 
 ## 管理规则
 
@@ -41,6 +44,11 @@ orchestrate.sh --project ~/code/xxx --requirement req.md \
 ```
 需改动：orchestrate.sh（参数解析 + run_phase 读取阶段模型）、workflow skill（支持生成新参数）、README。
 
+**已完成（CLI/config，2026-07-08）**:
+- `orchestrate.sh` 支持 `--model-explore`、`--model-design`、`--model-review` / `--model-review-plan`、`--model-revise`、`--model-implement`、`--model-review-code`、`--model-fix`。
+- `.workflow-config.yaml` 支持 `model_explore`、`model_design`、`model_review_plan`、`model_revise`、`model_implement`、`model_review_code`、`model_fix`。
+- 未指定阶段模型时继承全局 `--model` / `model`。
+
 ### 5. ~~错误恢复和断点续跑~~ → Done (2026-04-13)
 
 已实现 `--resume` 参数。
@@ -49,13 +57,19 @@ orchestrate.sh --project ~/code/xxx --requirement req.md \
 
 **Problem**: revise 用 `--resume <session-name>` 续接 design session，但多次测试后会产生多个同名 session，导致弹出交互式选择器而非自动续接。
 
-**Fix**: 改用 `--session-id <uuid>` 精确续接。design 阶段结束后从 Claude Code 的 session 存储目录（默认 `~/.claude`，可通过 `CLAUDE_HOME` 覆盖）查找最新 session ID，写入 workflow state；revise 时读取并用 `--session-id` 续接。
+**Fix**: 改用 session ID 精确续接。design 阶段结束后从 Claude Code 的 session 存储目录（默认 `~/.claude`，可通过 `CLAUDE_HOME` 覆盖）查找最新 session ID，写入 workflow state；revise 时读取并用 Claude Code `--resume <session_id>` 续接。注意：`--session-id <uuid>` 是指定当前 conversation ID，不是续接旧会话；用于续接会报 `Session ID ... is already in use`。
 
 ### 6. 产出质量自动校验（低优）
 
 **Problem**: 每阶段只检查输出文件是否存在，不检查内容是否完整。plan.md 可能缺少"可观测性"章节但仍被认为"完成"。
 
 **Fix**: 对 plan.md 和 review.md 做章节标题校验，缺少必需章节时警告或重跑。
+
+**已完成（skill 规则 + 脚本级校验，2026-07-09）**:
+- `/workflow` skill 增加轻量产物质量校验表。
+- 覆盖 requirement-review、plan、implementation-brief、review、impl-notes、code-review、fix-notes、observability-report 的必需章节和 VERDICT。
+- `bin/validate-artifact` 已提供脚本级产物校验，`orchestrate.sh` 只负责调用，避免 shell 入口只检查文件存在。
+- 交互阶段 prompt 已要求：与用户交流后若最终结论/边界/取舍变化，必须先回写产出文档，再通过 `workflow-state.json` 写入完成状态。
 
 ### 9. 编排器迁入 Claude Code（高优）
 
@@ -64,8 +78,8 @@ orchestrate.sh --project ~/code/xxx --requirement req.md \
 **Fix**: 将编排逻辑从 `orchestrate.sh` 迁入 Claude Code skill（`/workflow` 或新 skill），用 Bash `run_in_background` 驱动：
 
 1. Claude Code 做准备工作（理解需求、拉飞书文档、生成 requirement.md、确认参数）
-2. 每个阶段：Bash `run_in_background` 开 Ghostty 新 tab + 轮询 `.done`
-3. Agent 在新 tab 里执行，用户在 tab 内和 agent 交互，确认后 agent 写 `.done`
+2. 每个阶段：Bash `run_in_background` 开 Ghostty 新 tab + 轮询 `workflow-state.json`
+3. Agent 在新 tab 里执行，用户在 tab 内和 agent 交互，确认后 agent 写 `workflow-state.json` phase status
 4. 后台任务完成通知 Claude Code → Claude Code 在主对话中询问用户是否推进下一阶段
 5. 用户确认 → 开下一阶段
 
@@ -209,11 +223,33 @@ orchestrate.sh --project ~/code/xxx --requirement req.md \
 - `orchestrate.sh` / workflow skill 改为读 JSON 驱动
 - 支持 `--flow <path>` 参数指定自定义流程
 
+**已完成（manifest v2，2026-07-09）**:
+- 新增仓库默认 `workflow.json`，记录 phase name、skill、mode、model_key、output/latest、verdict、loop、resume_from，以及命名模板和别名/合法值约束。
+- 新增 `bin/create-workflow-run`，每次运行从仓库根 `workflow.json` 生成 `<workspace>/workflow.json`，写入 `kind: run`、`source_manifest`、`task_name`、provider/model 和本次 `execution.order`。
+- `bin/validate-workflow-manifest` 在启动时做 JSON 结构硬校验，`orchestrate.sh` 只负责调用校验结果，不再内嵌 schema 逻辑。
+- `orchestrate.sh` 支持 `--flow <file>` 作为模板输入，默认使用仓库内 `workflow.json`，生成 workspace run workflow 后将其路径和 schema version 写入 `workflow-state.json` metadata。
+- `bin/workflow-manifest` 统一提供 phase lookup、artifact path、template rendering、execution order、verdict/transition 解析。
+- `orchestrate.sh` 已从 manifest 读取 artifact path、prompt/run/started marker 命名模板、artifact validation 规则，以及 review/revise、review-code/fix 的 verdict transition。
+- `orchestrate.sh` 已根据 workspace `workflow.json` 的 `execution.order` 设置 shell phase 开关；review/revise 与 review-code/fix 的循环体仍保留显式 shell 控制流。
+- 新增 `bin/validate-workspace-artifacts` 校验 workspace 产物命名、latest 指针、review/fix 轮次连续、禁止 plan 变体，以及 state phase name 是否符合 manifest 模板。
+- README / workflow skill 说明：当前 manifest 用于统一描述和留档，执行循环仍由显式脚本/skill 流程驱动。
+
+**仍需跟进**:
+- 逐步让 `orchestrate.sh` 从 workspace run workflow 读取 confirm/model/mode 等简单字段。
+- 后续可继续把 breakpoint/confirm 策略从 shell 变量迁到 run workflow。
+
 ### 21. workflow.json 状态持久化（高优）
 
 **Problem**: 当前用 `.done` 文件 + Claude 内存记录进度，不可靠。断点续跑时需要 glob 扫描 `.done` 文件推断状态，容易出错。
 
 **Fix**: 在 workspace 中维护 `workflow-state.json`，记录每阶段状态（pending/running/done/failed）、开始/结束时间、产出文件路径、session ID。编排器启动时读取状态文件恢复进度，替代 `.done` 文件和内存。
+
+**当前状态（部分完成）**:
+- `bin/workflow-state` 已记录 workflow/task/provider/model/project/workspace、phase status、session_name、session_id、output_file、prompt_file、run_script、started_at、ended_at、exit_code，并作为 interactive phase 的唯一完成信号。
+- 新增 workflow-level `metadata`，当前用于记录 workspace run `flow_file`、`source_manifest`、`flow_schema_version`、`ghostty_window_id`、`current_phase`、`last_finished_phase`、`current_loop`、`current_round`、`artifact_validation_status`、`last_artifact_validation`。
+- review/revise 与 review-code/fix 循环会在 phase state 中记录 `round`、`loop`、`transition`、`resume_from`。
+- 新增 `bin/validate-workflow-state` 做结构和合法值硬校验，`orchestrate.sh` 只负责调用。
+- 续接策略已留档：revise 从 design 读取 session_id，fix 从 implement 读取 session_id；Claude 可回退 session name，Codex 必须有 session_id。
 
 ### 22. 输入摘要机制（中优）
 
@@ -360,7 +396,12 @@ orchestrate.sh --project ~/code/xxx --requirement req.md \
 **涉及改动**：
 - `review-plan/SKILL.md`
 
-### 32. 纯分析阶段迁移到原生 Agent / 非 Ghostty 执行（中优）
+**已完成（skill 规则，2026-07-08）**:
+- `review-plan/SKILL.md` 新增 Step 2.5：提取并验证方案隐含假设。
+- 要求对现有方法、类似实现、异常传播链、复用点、配置/枚举/状态等逐条读代码验证。
+- 评审报告新增“隐含假设验证”小节。
+
+### 32. 纯分析阶段迁移到原生 Agent / 非 Ghostty 执行（中优，部分完成）
 
 **Problem**: 当前所有阶段都通过 Ghostty 新 tab 启动独立 session，并用 `.done` 文件轮询。对 review-requirement、explore、review-plan、review-code、verify-observability 这类纯分析阶段来说，开 tab、生成 run script、导出环境变量、AppleScript、轮询完成标记都偏重。
 
@@ -374,7 +415,7 @@ orchestrate.sh --project ~/code/xxx --requirement req.md \
 - verify-observability：纯验证，产出验证报告
 
 **实现方向**：
-- `/workflow` skill 中优先用原生 Agent tool 调用这些阶段，Agent 返回即完成，不追加 `.done` 指令
+- `/workflow` skill 中优先用原生 Agent tool 调用这些阶段，Agent 返回即完成，不写 marker 文件
 - `orchestrate.sh` 可选增加 `run_phase_native` / print-mode 执行路径，用于非交互分析阶段
 - design / implement / revise / fix 继续使用 Ghostty tab，因为它们需要深度交互、跨天续接或精确 resume
 
@@ -385,6 +426,17 @@ orchestrate.sh --project ~/code/xxx --requirement req.md \
 **涉及改动**：
 - `workflow/SKILL.md`
 - `orchestrate.sh`
+
+**已完成（skill 流程，2026-06-22）**:
+- `/workflow` skill 已将 review-requirement、review-plan、review-code、verify-observability 定义为 Subagent phase。
+- Subagent phase 不生成 run script、不打开 Ghostty tab、不写 marker 文件，由主 agent 通过 Agent tool 派发、检查报告和 VERDICT。
+- explore 暂不子 agent 化，避免与 Claude 原生 Explore subagent 混淆。
+- design / revise / implement / fix 保持 Ghostty interactive phase。
+- Codex 无 Agent tool 时不强行模拟复杂子 agent，按同一约束直接执行分析 phase 或使用已验证的非交互 CLI runner。
+
+**仍需跟进**:
+- 让 shell 入口 `orchestrate.sh` 与 skill 流程术语完全对齐，避免未来维护时从 shell 实现倒推 skill 设计。
+- 等 review-requirement / verify-observability 在 shell 编排器中接入完整 phase 后，复用同一分析 runner 约束。
 
 ### 33. Ghostty 窗口选择持久化与手动指定（低优）
 
@@ -397,6 +449,117 @@ orchestrate.sh --project ~/code/xxx --requirement req.md \
 - `workflow/SKILL.md` 同步说明窗口 id 的保存、恢复和手动覆盖规则
 
 **暂缓原因**: 当前 `workflow-state` helper 还没有通用 metadata API，强行写入会扩大状态模型改动面。先用进程变量解决“每阶段误开新窗口”的主要问题。
+
+### 34. Explore 阶段 provider-aware 轻量化（中优）
+
+**Problem**: `/explore` skill 是本项目自定义的需求探索阶段，但 Claude Code 也有原生 Explore subagent type，两个概念容易混淆。当前 `/explore` skill 文档直接写“派发多个 Explore subagent”，容易让实现误以为所有 provider 都有同名原生能力，也容易过度设计 Codex 适配。
+
+**Clarification**:
+- Claude Code 原生 Explore subagent：适合代码定位、搜索、摘录，作为 `/explore` 内部可选 worker。
+- 本项目 `/explore` skill：负责需求探索阶段的 coordinator，产出 `explore/exploration.md`。
+- Codex 当前不需要实现复杂并行子 agent；保持直跑 `/explore`，用 `rg`/CodeGraph/普通读取完成探索即可。
+
+**Fix**:
+- 调整 `explore/SKILL.md`：不要强制指定 `subagent_type: Explore`，只说明“如果 provider 支持轻量探索 subagent，可按需使用；否则直接用代码搜索工具探索”。
+- Claude 路径允许 agent 自行决定是否调用原生 Explore subagent，不在 workflow/orchestrate 层硬编码。
+- Codex 路径不做多 worker 编排，避免增加复杂度。
+- `/explore` 的输出仍必须是 `explore/exploration.md`，包含路径、符号、证据、未覆盖范围。
+
+**涉及改动**:
+- `explore/SKILL.md`
+- `workflow/SKILL.md`（如有阶段说明需要澄清）
+
+**已完成（skill 规则，2026-07-08）**:
+- `explore/SKILL.md` 改为 provider-aware 探索。
+- Claude 原生 Explore subagent 仅作为可选能力，不再强制指定。
+- Codex / 无子 agent 环境明确走 `rg` / CodeGraph / Glob / Read 直接探索。
+
+### 35. 自定义 `/explore` skill 改名以避免和 Claude 原生 Explore 混淆（中优）
+
+**Problem**: 本项目的 `/explore` skill 与 Claude Code 原生 Explore subagent 同名，但职责不同。前者是需求探索阶段，后者是代码搜索/定位 worker。同名会导致讨论、prompt、日志和后续 provider 适配都混乱。
+
+**候选命名**:
+- `/investigate`：强调调研现有系统，较通用。
+- `/analyze-system`：强调系统分析，但略长。
+- `/research-codebase`：强调代码库调研，但偏英文语境。
+- `/scope-requirement`：强调需求落地范围，但不如 investigate 直观。
+
+**推荐**: 将本项目 `/explore` 改名为 `/investigate`。保留兼容入口 `/explore` 一段时间，文档中标注 deprecated。
+
+**Fix**:
+- 新增或重命名 `investigate/SKILL.md`。
+- `workflow/SKILL.md` 和 `orchestrate.sh` 将 Phase 1 从 `/explore` 改为 `/investigate`。
+- 保留 `explore/SKILL.md` 作为兼容 wrapper，提示“请调用 /investigate skill”。
+- README、CHANGELOG、backlog 中更新命名说明。
+
+**涉及改动**:
+- `explore/SKILL.md`
+- `investigate/SKILL.md`
+- `workflow/SKILL.md`
+- `orchestrate.sh`
+- `README.md`
+- `CHANGELOG.md`
+
+### 36. `/workflow` skill 与 Claude 原生 Dynamic Workflow 概念冲突（中优）
+
+**Problem**: Claude Code 现在会在普通实现任务中弹出 `Run a dynamic workflow?` 确认页，例如自动规划 `Scan Patterns / Create Models / Create Controllers / Create Skill / Verify` 等阶段，并提示可用 `/workflows` 管理、在 `/config` 关闭。这不是本项目 `/workflow` skill 内部流程触发的，但名字和语义容易混淆：用户看到 "workflow" 可能无法判断是 Claude 原生 dynamic workflow，还是本项目的 `/workflow` 编排器。
+
+另一个相关现象是 Claude 原生 dynamic workflow 或非交互子流程可能报 `Please run /login · API Error: 401 Authentication Error, No api key passed in.`。这通常不是 j-workflow phase 产物合同失败，而是 Claude Code 原生 workflow/subagent 执行路径没有拿到当前会话的认证态，或走到了需要 `ANTHROPIC_API_KEY` 的 API-key 认证路径。
+
+**Clarification**:
+- Claude 原生 Dynamic Workflow：Claude Code runtime 的能力，用于把大任务拆成多个并行 subagents，可能消耗大量 token，并由 Claude Code 自己弹出确认。
+- 本项目 `/workflow` skill：需求到设计、评审、实现、代码评审的工程编排器，产物落在 `.workflow/<name>/`，有固定 phase/output/VERDICT 合同。
+- 这不是当前 flow 内部 bug，而是命名和概念重叠导致的认知冲突。
+- 认证错误需要单独处理：不能假设原生 dynamic workflow 一定继承当前交互式 Claude Code 的 `/login` 状态。
+
+**Potential positive use**:
+- 在本项目 `implement` 阶段中，如果 provider 是 Claude Code，且任务天然可以拆分为低耦合子任务（如批量创建模型、批量补测试、多个独立 endpoint），可以允许 implement agent 在明确提示用户并获得确认后调用 Claude 原生 dynamic workflow。
+- 原生 dynamic workflow 只能作为 implement 阶段内部的执行加速手段，不能替代 `/workflow` 的阶段产物合同：仍必须写 `implement/impl-notes.md`，仍必须接受 `review-code` 阶段检查。
+- 不应在 review-plan / review-code 这类分析 phase 中触发原生 dynamic workflow，避免 token 爆炸和上下文不可控。
+- 如果原生 dynamic workflow 报 `/login` 或 `No api key passed in`，implement agent 应停止使用该能力，回退到普通实现流程，并在 `impl-notes.md` 记录认证阻塞；不要反复重试消耗 token。
+
+**Fix**:
+- 在 `workflow/SKILL.md` 中增加术语说明：`/workflow` skill 与 Claude Code `/workflows` / dynamic workflow 是不同机制。
+- 将本项目文档中的泛化 "workflow" 表述收窄为 "j-workflow orchestration" 或 "phase orchestration"，减少误导。
+- 在 `implement/SKILL.md` 中增加可选规则：只有在用户确认、任务可并行、且能保持产物合同时，Claude implement agent 才可使用原生 dynamic workflow。
+- 在 `implement/SKILL.md` 中增加认证前置检查：使用原生 dynamic workflow 前确认 Claude Code auth 可用；遇到 401 `/login` / `No api key passed in` 时回退到普通实现，不把它当作代码实现失败。
+- 在 README 中补充一段 provider-specific note，说明 Claude Code dynamic workflow 弹窗不代表 j-workflow 正在运行。
+
+**涉及改动**:
+- `workflow/SKILL.md`
+- `implement/SKILL.md`
+- `README.md`
+- `docs/multi-agent-workflow-optimizations/README.md`
+
+**已完成（skill/docs，2026-07-08）**:
+- `workflow/SKILL.md` 增加术语边界：j-workflow `/workflow` 与 Claude Code `/workflows` / dynamic workflow 不是同一机制。
+- `implement/SKILL.md` 增加 Claude 原生 dynamic workflow 使用边界、用户确认要求和 401 回退规则。
+- README 增加 Claude Code provider note。
+
+### 37. Design / Implement 是否合并为同一 Agent 或同一长会话（中优）
+
+**Problem**: 当前 design 和 implement 是两个独立阶段、两个独立 agent session。好处是职责清晰、评审隔离、上下文边界明确；问题是 implement agent 只能通过 design 交付文件理解设计意图，读不到 design 阶段的推理过程和用户讨论细节。复杂需求中，如果 `plan.md` 没有精确表达所有必须改动，implement 容易漏上下文或误解方案。
+
+**Tradeoff**:
+- 合并为同一 agent / 同一长会话：设计意图连续，用户讨论不丢，实现时更懂 why；但上下文更容易膨胀，design 阶段的探索噪音会进入 implement，review-plan 后的修正也可能让长会话注意力漂移。
+- 保持独立 agent + 强设计交付：上下文可控，review-plan 能作为明确阶段闸门；但要求 `plan.md` 作为唯一权威来源足够完整，所有必须信息都要文件化。`implementation-brief.md` 只能作为 plan-derived checklist / trace index，不能补充 plan 外设计。
+
+**Current direction**:
+- 默认仍保持 design / implement 分离。
+- 强化 design 交付完整性：`plan.md` 是唯一权威设计与实现依据；`implementation-brief.md` 是从 plan 派生的核对索引，必须精准映射 Required Changes、Contract Changes、Cross-repo Sync Points、Tests Required，且每项能回链到 plan。
+- 对小型、低风险、无需严格评审的任务，未来可提供可选模式：`design+implement` 由同一个 interactive agent 连续完成，但仍必须先写设计摘要和 implementation brief，再开始改代码。
+
+**Fix options**:
+- Option A（推荐短期）：继续分离阶段，完善 `plan.md` 交付完整性要求，并用 `implementation-brief.md` 作为覆盖性校验索引，确保新 session 可从 plan 独立复原实现意图。
+- Option B：新增 `--merge-design-implement` / workflow 参数，仅对简单任务启用；design agent 在用户确认方案后直接进入 implement。
+- Option C：保持两个阶段但复用同一 provider session：implement 续接 design session，并在开始实现前强制重新读取完整 `plan.md` 和 plan-derived `implementation-brief.md`；文件优先于历史上下文，冲突时回到 design/revise 修 design 产物。
+
+**涉及改动**:
+- `workflow/SKILL.md`
+- `design/SKILL.md`
+- `implement/SKILL.md`
+- `orchestrate.sh`
+- `README.md`
 
 ## Not Adopted
 

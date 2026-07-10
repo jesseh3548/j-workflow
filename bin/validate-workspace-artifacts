@@ -1,0 +1,212 @@
+#!/usr/bin/env python3
+import argparse
+import filecmp
+import fnmatch
+import json
+import os
+import re
+import sys
+
+
+FORBIDDEN_PATTERNS = [
+    "design/final-plan.md",
+    "design/plan-final.md",
+    "design/fix-design.md",
+    "design/*fix-design*.md",
+    "design/plan-fix-r*.md",
+    "design/final*.md",
+    "design/*-final.md",
+    "**/fix-design.md",
+    "**/plan-fix-r*.md",
+    "**/final-plan.md",
+    "**/plan-final.md",
+]
+
+IGNORED_DIRS = {"archive"}
+IGNORED_SUFFIXES = (".prompt", ".run.sh", ".started", ".log")
+IGNORED_FILES = {"workflow.json", "workflow-state.json", "requirement.md", "idea.txt"}
+
+
+def load_json(path):
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def rel(path, workspace):
+    return os.path.relpath(path, workspace).replace(os.sep, "/")
+
+
+def iter_files(workspace):
+    for root, dirs, files in os.walk(workspace):
+        dirs[:] = [d for d in dirs if d not in IGNORED_DIRS and not d.startswith(".")]
+        for name in files:
+            path = os.path.join(root, name)
+            yield rel(path, workspace)
+
+
+def render(template, **values):
+    return template.format(**values)
+
+
+def phase_paths(manifest, max_round):
+    allowed = set(manifest.get("artifacts", {}).values())
+    latest_paths = {}
+    versioned = {}
+
+    for phase in manifest.get("phases", []):
+        phase_id = phase["id"]
+        if "output" in phase:
+            allowed.add(phase["output"])
+        for output in phase.get("outputs", []):
+            allowed.add(output)
+        for update in phase.get("updates", []):
+            if "{round}" in update:
+                for round_num in range(1, max_round + 1):
+                    allowed.add(render(update, round=round_num))
+            else:
+                allowed.add(update)
+        if "latest" in phase:
+            latest_paths[phase_id] = phase["latest"]
+            allowed.add(phase["latest"])
+        if "output_pattern" in phase:
+            pattern = phase["output_pattern"]
+            versioned[phase_id] = pattern
+            for round_num in range(1, max_round + 1):
+                allowed.add(render(pattern, round=round_num))
+    return allowed, latest_paths, versioned
+
+
+def is_ignored(path):
+    if os.path.basename(path).startswith("."):
+        return True
+    if path in IGNORED_FILES:
+        return True
+    if path.endswith(IGNORED_SUFFIXES):
+        return True
+    return False
+
+
+def matches_any(path, patterns):
+    return any(fnmatch.fnmatch(path, pattern) for pattern in patterns)
+
+
+def collect_rounds(paths, pattern):
+    regex = re.escape(pattern).replace(re.escape("{round}"), r"(?P<round>[1-9][0-9]*)")
+    regex = f"^{regex}$"
+    found = []
+    compiled = re.compile(regex)
+    for path in paths:
+        match = compiled.match(path)
+        if match:
+            found.append(int(match.group("round")))
+    return sorted(set(found))
+
+
+def require_contiguous_rounds(phase_id, rounds, errors):
+    if not rounds:
+        return
+    expected = list(range(1, max(rounds) + 1))
+    if rounds != expected:
+        errors.append(f"{phase_id} rounds must be contiguous from r1: found {rounds}, expected {expected}")
+
+
+def compare_latest(workspace, latest_path, versioned_pattern, paths, errors):
+    rounds = collect_rounds(paths, versioned_pattern)
+    if not rounds:
+        return
+    latest_abs = os.path.join(workspace, latest_path)
+    if not os.path.exists(latest_abs):
+        errors.append(f"latest artifact missing: {latest_path}")
+        return
+    newest = render(versioned_pattern, round=max(rounds))
+    newest_abs = os.path.join(workspace, newest)
+    if os.path.exists(newest_abs) and not filecmp.cmp(latest_abs, newest_abs, shallow=False):
+        errors.append(f"latest artifact {latest_path} does not match newest round {newest}")
+
+
+def validate_state_names(workspace, manifest, errors):
+    state_path = os.path.join(workspace, "workflow-state.json")
+    if not os.path.exists(state_path):
+        return
+    state = load_json(state_path)
+    if manifest.get("kind") == "run":
+        phase_ids = set(manifest.get("execution", {}).get("order", []))
+    else:
+        phase_ids = {phase["id"] for phase in manifest.get("phases", [])}
+    instance_patterns = []
+    for phase in manifest.get("phases", []):
+        if manifest.get("kind") == "run" and phase["id"] not in phase_ids:
+            continue
+        pattern = phase.get("instance_name_template", phase["id"])
+        regex = re.escape(pattern).replace(re.escape("{round}"), r"[1-9][0-9]*")
+        instance_patterns.append(re.compile(f"^{regex}$"))
+
+    for name in state.get("phases", {}):
+        if name in phase_ids:
+            continue
+        if any(regex.match(name) for regex in instance_patterns):
+            continue
+        errors.append(f"workflow-state phase name is not allowed by manifest templates: {name}")
+
+
+def validate(args):
+    workspace = os.path.abspath(args.workspace)
+    manifest = load_json(args.manifest)
+    if not os.path.isdir(workspace):
+        raise ValueError(f"workspace not found: {workspace}")
+
+    paths = sorted(iter_files(workspace))
+    max_round = max(args.max_round, 500)
+    allowed, latest_paths, versioned = phase_paths(manifest, max_round)
+    errors = []
+
+    for path in paths:
+        if matches_any(path, FORBIDDEN_PATTERNS):
+            errors.append(f"forbidden artifact name: {path}")
+            continue
+        if is_ignored(path):
+            continue
+        if path not in allowed:
+            errors.append(f"unexpected artifact path: {path}")
+
+    plan_path = os.path.join(workspace, "design/plan.md")
+    if os.path.exists(os.path.join(workspace, "design")) and not os.path.exists(plan_path):
+        design_files = [p for p in paths if p.startswith("design/") and p.endswith(".md")]
+        if design_files:
+            errors.append("design/plan.md is missing while design artifacts exist")
+
+    for phase_id, pattern in versioned.items():
+        rounds = collect_rounds(paths, pattern)
+        require_contiguous_rounds(phase_id, rounds, errors)
+        if phase_id in latest_paths:
+            compare_latest(workspace, latest_paths[phase_id], pattern, paths, errors)
+
+    validate_state_names(workspace, manifest, errors)
+
+    if errors:
+        for error in errors:
+            print(f"[ERROR] {error}", file=sys.stderr)
+        return 1
+    print("ok")
+    return 0
+
+
+def build_parser():
+    parser = argparse.ArgumentParser(description="Validate j-workflow workspace artifact names and latest pointers.")
+    parser.add_argument("--manifest", required=True)
+    parser.add_argument("--workspace", required=True)
+    parser.add_argument("--max-round", type=int, default=50)
+    return parser
+
+
+def main():
+    args = build_parser().parse_args()
+    try:
+        return validate(args)
+    except Exception as exc:
+        print(f"[ERROR] validate-workspace-artifacts: {exc}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

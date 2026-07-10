@@ -85,6 +85,8 @@ def codex_candidates(project_dir, started_epoch):
     pattern = os.path.expanduser("~/.codex/sessions/**/*.jsonl")
     for path in glob.glob(pattern, recursive=True):
         for event in iter_jsonl(path):
+            if not isinstance(event, dict):
+                continue
             if event.get("type") != "session_meta":
                 continue
             payload = event.get("payload", {})
@@ -146,7 +148,11 @@ def claude_candidates(project_dir, session_name, started_epoch):
             saw_cwd = False
             best_candidate = None
             for event in iter_json_objects(path):
+                if not isinstance(event, dict):
+                    continue
                 payload = event.get("payload", event)
+                if not isinstance(payload, dict):
+                    payload = {}
                 text = json.dumps(event, ensure_ascii=False)
                 if session_name and session_name in text:
                     session_name_seen = True

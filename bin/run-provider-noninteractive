@@ -1,0 +1,87 @@
+#!/usr/bin/env python3
+import argparse
+import os
+import subprocess
+
+
+def read_text(path):
+    with open(path, "r", encoding="utf-8") as f:
+        return f.read()
+
+
+def build_command(args):
+    if args.provider == "claude":
+        return [
+            args.provider_cli,
+            "-p",
+            "--output-format",
+            "text",
+            "--model",
+            args.model,
+            "--add-dir",
+            args.project_dir,
+            "--add-dir",
+            args.workspace_dir,
+            "--permission-mode",
+            "acceptEdits",
+            read_text(args.prompt_file),
+        ], None
+
+    if args.provider == "codex":
+        return [
+            args.provider_cli,
+            "exec",
+            "--ephemeral",
+            "--sandbox",
+            "workspace-write",
+            "--skip-git-repo-check",
+            "-m",
+            args.model,
+            "-C",
+            args.project_dir,
+            "--add-dir",
+            args.workspace_dir,
+            "-",
+        ], read_text(args.prompt_file)
+
+    raise ValueError(f"Unsupported provider: {args.provider}")
+
+
+def build_env():
+    env = os.environ.copy()
+    env["NODE_TLS_REJECT_UNAUTHORIZED"] = "0"
+    env["PATH"] = f"/opt/homebrew/bin:/usr/local/bin:{env.get('HOME', '')}/.local/bin:{env.get('PATH', '')}"
+    return env
+
+
+def build_parser():
+    parser = argparse.ArgumentParser(description="Run Claude/Codex non-interactively for a j-workflow analysis phase.")
+    parser.add_argument("--provider", required=True, choices=["claude", "codex"])
+    parser.add_argument("--provider-cli", required=True)
+    parser.add_argument("--model", required=True)
+    parser.add_argument("--project-dir", required=True)
+    parser.add_argument("--workspace-dir", required=True)
+    parser.add_argument("--prompt-file", required=True)
+    parser.add_argument("--log-file", required=True)
+    return parser
+
+
+def main():
+    args = build_parser().parse_args()
+    command, stdin_text = build_command(args)
+    os.makedirs(os.path.dirname(os.path.abspath(args.log_file)), exist_ok=True)
+    with open(args.log_file, "w", encoding="utf-8") as log:
+        result = subprocess.run(
+            command,
+            input=stdin_text,
+            text=True,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            env=build_env(),
+            check=False,
+        )
+    return result.returncode
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

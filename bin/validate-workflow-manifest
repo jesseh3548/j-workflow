@@ -1,0 +1,145 @@
+#!/usr/bin/env python3
+import json
+import os
+import sys
+
+
+def main():
+    if len(sys.argv) != 2:
+        print("usage: validate-workflow-manifest <workflow.json>", file=sys.stderr)
+        return 2
+
+    path = sys.argv[1]
+    if not os.path.isfile(path):
+        print(f"[ERROR] manifest not found: {path}", file=sys.stderr)
+        return 1
+
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    required_top = [
+        "schema_version",
+        "name",
+        "description",
+        "defaults",
+        "resume_policy",
+        "execution",
+        "naming",
+        "validation",
+        "phase_aliases",
+        "artifacts",
+        "phases",
+    ]
+    missing = [key for key in required_top if key not in data]
+    if missing:
+        raise ValueError(f"flow manifest missing top-level keys: {', '.join(missing)}")
+
+    if not isinstance(data["schema_version"], int) or data["schema_version"] < 1:
+        raise ValueError("schema_version must be a positive integer")
+
+    validation = data["validation"]
+    allowed_modes = set(validation.get("allowed_modes", []))
+    allowed_confirms = set(validation.get("allowed_confirm_values", []))
+    allowed_verdicts = set(validation.get("allowed_verdicts", []))
+    required_phase_keys = validation.get("required_phase_keys", [])
+
+    if not isinstance(data["phases"], list) or not data["phases"]:
+        raise ValueError("phases must be a non-empty list")
+
+    phase_map = {}
+    for phase in data["phases"]:
+        if not isinstance(phase, dict):
+            raise ValueError("each phase must be a JSON object")
+        for key in required_phase_keys:
+            if key not in phase:
+                raise ValueError(f"phase {phase.get('id', '<unknown>')} missing required key: {key}")
+        if phase["id"] in phase_map:
+            raise ValueError(f"duplicate phase id: {phase['id']}")
+        phase_map[phase["id"]] = phase
+
+    for phase in data["phases"]:
+        if allowed_modes and phase["mode"] not in allowed_modes:
+            raise ValueError(f"phase {phase['id']} has invalid mode: {phase['mode']}")
+        if "confirm" in phase and phase["confirm"] not in allowed_confirms:
+            raise ValueError(f"phase {phase['id']} has invalid confirm value: {phase['confirm']}")
+        if "verdicts" in phase:
+            verdicts = phase["verdicts"]
+            if not isinstance(verdicts, list) or not verdicts:
+                raise ValueError(f"phase {phase['id']} verdicts must be a non-empty list")
+            for verdict in verdicts:
+                if verdict not in allowed_verdicts:
+                    raise ValueError(f"phase {phase['id']} has invalid verdict: {verdict}")
+        if "resume_from" in phase and phase["resume_from"] not in phase_map:
+            raise ValueError(f"phase {phase['id']} resume_from references unknown phase: {phase['resume_from']}")
+        if "loop" in phase and not isinstance(phase["loop"], str):
+            raise ValueError(f"phase {phase['id']} loop must be a string")
+        if "skill" in phase and phase["skill"] is not None and not isinstance(phase["skill"], str):
+            raise ValueError(f"phase {phase['id']} skill must be null or string")
+        if not any(key in phase for key in ("output", "outputs", "output_pattern")):
+            raise ValueError(f"phase {phase['id']} must define output, outputs, or output_pattern")
+        if "artifact_check" in phase:
+            check = phase["artifact_check"]
+            if not isinstance(check, dict):
+                raise ValueError(f"phase {phase['id']} artifact_check must be an object")
+            required_keywords = check.get("required_keywords", [])
+            if not isinstance(required_keywords, list) or not all(isinstance(item, str) for item in required_keywords):
+                raise ValueError(f"phase {phase['id']} artifact_check.required_keywords must be a string list")
+            check_verdicts = check.get("verdicts", [])
+            if not isinstance(check_verdicts, list) or not all(isinstance(item, str) for item in check_verdicts):
+                raise ValueError(f"phase {phase['id']} artifact_check.verdicts must be a string list")
+            for verdict in check_verdicts:
+                if verdict not in allowed_verdicts:
+                    raise ValueError(f"phase {phase['id']} artifact_check has invalid verdict: {verdict}")
+        if "transitions" in phase:
+            transitions = phase["transitions"]
+            if not isinstance(transitions, dict):
+                raise ValueError(f"phase {phase['id']} transitions must be an object")
+            for verdict, target in transitions.items():
+                if verdict not in allowed_verdicts:
+                    raise ValueError(f"phase {phase['id']} transitions has invalid verdict: {verdict}")
+                if not isinstance(target, str):
+                    raise ValueError(f"phase {phase['id']} transition target for {verdict} must be a string")
+
+    execution = data["execution"]
+    if not isinstance(execution, dict):
+        raise ValueError("execution must be an object")
+    for key in ("skill_order", "shell_order", "shell_excluded"):
+        values = execution.get(key)
+        if not isinstance(values, list) or not all(isinstance(item, str) for item in values):
+            raise ValueError(f"execution.{key} must be a string list")
+        for phase_id in values:
+            if phase_id not in phase_map:
+                raise ValueError(f"execution.{key} references unknown phase: {phase_id}")
+    if data.get("kind") == "run":
+        values = execution.get("order")
+        if not isinstance(values, list) or not values or not all(isinstance(item, str) for item in values):
+            raise ValueError("run workflow execution.order must be a non-empty string list")
+        for phase_id in values:
+            if phase_id not in phase_map:
+                raise ValueError(f"execution.order references unknown phase: {phase_id}")
+        disabled = execution.get("disabled", [])
+        if not isinstance(disabled, list) or not all(isinstance(item, str) for item in disabled):
+            raise ValueError("run workflow execution.disabled must be a string list")
+        for phase_id in disabled:
+            if phase_id not in phase_map:
+                raise ValueError(f"execution.disabled references unknown phase: {phase_id}")
+        overlap = set(values) & set(disabled)
+        if overlap:
+            raise ValueError(f"run workflow phases cannot be both ordered and disabled: {', '.join(sorted(overlap))}")
+
+    for alias, target in data["phase_aliases"].items():
+        if not isinstance(alias, str) or not isinstance(target, str):
+            raise ValueError("phase_aliases must map strings to strings")
+        if target not in phase_map:
+            raise ValueError(f"phase alias {alias} points to unknown phase: {target}")
+
+    print(data["schema_version"])
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except Exception as exc:
+        print(f"[ERROR] validate-workflow-manifest: {exc}", file=sys.stderr)
+        raise SystemExit(1)

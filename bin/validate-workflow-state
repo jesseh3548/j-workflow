@@ -1,0 +1,106 @@
+#!/usr/bin/env python3
+import json
+import os
+import sys
+
+
+ALLOWED_PHASE_STATUS = {"running", "done", "failed", "skipped"}
+
+
+def require_string(obj, key, where):
+    value = obj.get(key)
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{where}.{key} must be a non-empty string")
+
+
+def require_optional_string(obj, key, where):
+    if key in obj and obj[key] is not None and not isinstance(obj[key], str):
+        raise ValueError(f"{where}.{key} must be a string")
+
+
+def validate_phase(name, phase):
+    where = f"phases.{name}"
+    if not isinstance(phase, dict):
+        raise ValueError(f"{where} must be an object")
+
+    if "status" in phase:
+        status = phase["status"]
+        if status not in ALLOWED_PHASE_STATUS:
+            raise ValueError(f"{where}.status has invalid value: {status}")
+
+    for key in (
+        "provider",
+        "model",
+        "session_name",
+        "output_file",
+        "prompt_file",
+        "run_script",
+        "started_at",
+        "started_epoch",
+        "ended_at",
+        "exit_code",
+        "session_id",
+        "round",
+        "loop",
+        "transition",
+        "resume_from",
+    ):
+        require_optional_string(phase, key, where)
+
+    if phase.get("status") == "running":
+        for key in ("provider", "model", "session_name", "output_file", "prompt_file", "run_script", "started_at"):
+            require_string(phase, key, where)
+
+    if phase.get("status") in {"done", "failed", "skipped"}:
+        require_string(phase, "ended_at", where)
+        require_string(phase, "exit_code", where)
+
+
+def validate_state(data):
+    if not isinstance(data, dict):
+        raise ValueError("workflow state must be an object")
+
+    for key in ("workflow_id", "task_name", "provider", "model", "project_dir", "workspace_dir", "created_at", "updated_at"):
+        require_string(data, key, "state")
+
+    if "metadata" in data:
+        metadata = data["metadata"]
+        if not isinstance(metadata, dict):
+            raise ValueError("state.metadata must be an object")
+        for key, value in metadata.items():
+            if not isinstance(key, str) or not isinstance(value, str):
+                raise ValueError("state.metadata must map strings to strings")
+
+    phases = data.get("phases")
+    if not isinstance(phases, dict):
+        raise ValueError("state.phases must be an object")
+    for name, phase in phases.items():
+        if not isinstance(name, str) or not name:
+            raise ValueError("phase names must be non-empty strings")
+        validate_phase(name, phase)
+
+
+def main():
+    if len(sys.argv) != 2:
+        print("usage: validate-workflow-state <workflow-state.json>", file=sys.stderr)
+        return 2
+
+    path = sys.argv[1]
+    if not os.path.isfile(path):
+        print(f"[ERROR] workflow state not found: {path}", file=sys.stderr)
+        return 1
+
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    validate_state(data)
+    print("ok")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except Exception as exc:
+        print(f"[ERROR] validate-workflow-state: {exc}", file=sys.stderr)
+        raise SystemExit(1)

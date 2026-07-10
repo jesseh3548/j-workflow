@@ -15,6 +15,7 @@ allowed-tools: ["*"]
 2. **遵循方案** — 不自由发挥，方案说怎么做就怎么做
 3. **吸收评审反馈** — review.md 中的问题必须在实现中解决
 4. **小步迭代** — 每次只做一小步，测试通过后再下一步
+5. **最终方案完整** — 实现或修复过程中确认的新细节、边界、取舍、人工 CR 结论，必须同步回 plan.md；必要时同步 implementation-brief.md
 
 ## 输入
 
@@ -31,6 +32,22 @@ allowed-tools: ["*"]
 3. 读 revise-notes.md（如有），了解方案修正内容
 4. **关键：读 plan.md 中"实现指引"章节列出的所有文件**，深入理解每个文件的职责、调用关系、现有模式
 5. 分解为可独立测试的小任务
+
+### Step 1.5: Claude 原生 Dynamic Workflow 使用边界（仅 Claude Code）
+
+Claude Code 可能在大型实现任务中提示 `Run a dynamic workflow?`，这是 Claude Code runtime 的原生能力，不是 j-workflow 的 `/workflow` phase orchestration。
+
+默认不要主动触发原生 dynamic workflow。只有同时满足以下条件时才可以使用：
+- 当前 provider 是 Claude Code
+- 任务天然可拆分为低耦合并行子任务（例如批量模型类、多个独立 endpoint、独立测试补齐）
+- 已向用户明确说明会调用 Claude 原生 dynamic workflow，且用户确认
+- 仍能保持 j-workflow 产物合同：按 `plan.md` 实现，写 `impl-notes.md`，接受后续 `/review-code`
+
+禁止事项：
+- 不要用原生 dynamic workflow 替代 `plan.md` / `implementation-brief.md` 的实现依据。
+- 不要在未确认时自动运行高 token 的并行 workflow。
+- 不要在 review-plan / review-code 这类评审阶段触发原生 dynamic workflow。
+- 如果原生 dynamic workflow 报 `Please run /login`、`API Error: 401`、`No api key passed in` 或类似认证错误，立即停止使用该能力，回退到普通实现流程，并在 `impl-notes.md` 记录认证阻塞；不要反复重试。
 
 ### Step 2: 对每个小任务执行 TDD 循环
 
@@ -68,8 +85,15 @@ Refactor → 重构代码，保持测试绿色
 - [ ] 接口设计：plan 中定义的每个 API/RPC 接口是否都已实现，参数和返回值是否一致
 - [ ] 核心流程：plan 中描述的每个流程步骤是否都有对应代码
 - [ ] 可观测性：plan 3.7 节中的日志记录点、指标埋点是否都已实现
+- [ ] 实现或修复过程中与用户/人工 CR 确认的新事实，是否已写回 plan.md 对应章节
+- [ ] 如新事实影响实现核对项，implementation-brief.md 是否已同步，且没有 plan 外内容
 
 如发现遗漏或偏差，立即补充实现。
+
+如果发现实现必须偏离 plan，或用户/人工 CR 确认了 plan 未覆盖的细节，不要只写在 impl-notes/fix-notes 中。必须：
+1. 更新 plan.md 对应章节，让 plan 保持完整、自洽、最新。
+2. 如影响 Required Changes、Contract Changes、Cross-repo Sync Points、Edge Cases、Tests Required 或 Review Checklist，同步更新 implementation-brief.md。
+3. 如果当前阶段无法安全修改 design 产物，标记 `BLOCKED: plan update required`，说明需要回到 design/revise。
 
 ### Step 5: 增量覆盖率检查（强制，不可跳过）
 
@@ -108,6 +132,7 @@ git diff --name-only --diff-filter=AM HEAD | grep -E '\.java$' | grep -v '/test/
   - 方案符合度自检（逐项对照结果，标注 ✅已实现 / ⚠️有偏差并说明原因）
   - 测试覆盖情况
   - 已知局限（如单测覆盖不到的部分）
+  - plan.md / implementation-brief.md 同步情况
   - 实现决策记录（与用户讨论中达成的决策，格式：决策点 + 结论 + 理由）
 
 ## 决策确认规则
@@ -124,6 +149,7 @@ git diff --name-only --diff-filter=AM HEAD | grep -E '\.java$' | grep -v '/test/
 | 影响范围超预期 | 发现需要改动方案未提及的文件或模块 |
 | 测试边界 | 不确定某个场景是否需要测试覆盖 |
 | 兼容性决策 | 改动可能影响现有功能，需要选择兼容策略 |
+| 人工 CR 反馈 | 用户在主对话或当前 session 提供人工 CR 结论，需要判断是否影响 plan |
 
 ### 确认格式
 
@@ -153,6 +179,7 @@ B. [做法描述]（影响/代价）
 - **先问再做** — 不能写了代码再问"这样行吗"
 - **不能绕过** — 发现方案有问题时不能自己绕过去，必须告知用户
 - **不能擅自扩大范围** — 方案没提到的功能不能偷偷加
+- **不能只记 notes** — 任何会影响最终实现理解的细节，都必须同步回 plan.md；notes 只能记录修复过程和同步情况
 
 ## 编码规范（写代码时必须遵守）
 

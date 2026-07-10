@@ -7,6 +7,23 @@
 - Start Ghostty phases through a temporary no-space launcher script instead of `bash <run_script>`, avoiding Chinese IME conversion of `bash` and Ghostty command argument parsing failures.
 - Rework the `review-code` skill to expand review context beyond changed hunks, report callers/callees/tests/config coverage, and keep review separate from code fixing.
 - Restructure `review-code` rules into an Alibaba Java Coding Guidelines-style hierarchy with a routing index and focused rule files for programming, exception/logging, MySQL, project, security, testing, performance, and observability reviews.
+- Add `design/implementation-brief.md` as a plan-derived implementation checklist / trace index and pass it through implement, review-code, and fix prompts so new sessions can verify completeness without treating the brief as a second source of truth.
+- Add review-code context budget rules: hunk-first diff reading, staged/unstaged coverage, and bounded line-window reads for large source files.
+- Update `/workflow` skill execution flow so pure analysis phases run as bounded subagent phases, while explore/design/revise/implement/fix remain Ghostty interactive phases.
+- Strengthen design/review-plan/implement contracts: plan.md is the single source of truth, implementation-brief is only a plan-derived checklist, review-plan verifies hidden assumptions, and workflow performs lightweight artifact quality checks.
+- Clarify provider-native capabilities: `/explore` no longer forces Claude's native Explore subagent, and Claude Code dynamic workflow is documented as separate from j-workflow orchestration.
+- Add phase-specific model overrides for the shell orchestrator and config file, including design/review/implement/review-code/fix model selection.
+- Add `workflow.json` as the default declarative phase manifest and record the selected flow file in `workflow-state.json` metadata.
+- Split orchestration helpers into `bin/` scripts: manifest access, artifact validation, workflow-state validation, Ghostty window detection, phase run-script rendering, and non-interactive provider execution now live outside `orchestrate.sh`.
+- Drive review/revise and review-code/fix loop transitions from `workflow.json` verdict mappings, and persist loop metadata (`round`, `loop`, `transition`, `resume_from`, `current_phase`, `last_finished_phase`, `ghostty_window_id`) in `workflow-state.json`.
+- Add `--skip-git-repo-check` to the Codex non-interactive runner so analysis phases can run in temporary validation/workspace directories.
+- Require review-code/fix/manual CR decisions to synchronize final facts back into `design/plan.md`, and into `design/implementation-brief.md` when checklist content changes.
+- Clarify that `design/plan.md` is the only final/latest plan filename; fix/manual CR updates modify it directly instead of creating additional final-plan variants.
+- Align `/workflow` artifact validation docs with `workflow.json` for Plan/Brief synchronization fields, while leaving `review-requirement` and `verify-observability` out of the shell entry for now.
+- Add `bin/validate-workspace-artifacts` and call it from `orchestrate.sh` to enforce workspace artifact names, latest pointers, contiguous review/fix rounds, forbidden plan variants, and manifest-compatible state phase names.
+- Add `TODO.md` as the short current backlog so future agents do not need to infer active work from historical optimization notes.
+- Replace interactive phase `.done` marker files with `workflow-state.json` phase status as the single completion signal; run scripts now only use workflow state for user-confirmed completion and exit-code fallback.
+- Add `bin/create-workflow-run` and generate `<workspace>/workflow.json` for each run from the repository workflow template; `orchestrate.sh` records the workspace workflow in state and uses its `execution.order` to set shell phase switches.
 
 ## v2.3 — 2026-05-17
 

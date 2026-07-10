@@ -9,6 +9,10 @@ project_dir: ~/code/your-project
 # 工作区目录（可选，默认 <project_dir>/.workflow）
 # workspace_dir: ./.workflow
 
+# Flow manifest template（可选，默认使用 j-workflow 仓库内 workflow.json）
+# orchestrate.sh 会基于该模板和阶段开关生成 <workspace>/<name>/workflow.json 作为本次 run workflow
+# flow_file: ./workflow.json
+
 # Agent provider（可选，默认自动推断；支持 claude 或 codex）
 # provider: claude
 
@@ -18,6 +22,15 @@ project_dir: ~/code/your-project
 # Codex 示例：
 # provider: codex
 # model: gpt-5.5
+#
+# 阶段模型覆盖（可选，未指定则继承 model）
+# model_explore: claude-sonnet-4-6
+# model_design: claude-opus-4-6
+# model_review_plan: claude-opus-4-6
+# model_revise: claude-opus-4-6
+# model_implement: claude-sonnet-4-6
+# model_review_code: claude-opus-4-6
+# model_fix: claude-sonnet-4-6
 
 # ── 阶段开关 ──
 # true = 启用, false = 跳过

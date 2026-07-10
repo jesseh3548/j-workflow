@@ -1,0 +1,212 @@
+{
+  "schema_version": 2,
+  "name": "j-workflow-default",
+  "description": "Default j-workflow phase manifest. This file is the strict execution contract for phase naming, templates, resume policy, and artifact metadata. orchestrate.sh still owns execution.",
+  "defaults": {
+    "confirm": "required",
+    "model_key": "model",
+    "state_file": "workflow-state.json"
+  },
+  "resume_policy": {
+    "store": "workflow-state.json",
+    "session_id_first": true,
+    "claude_fallback": "session_name",
+    "codex_requires_session_id": true,
+    "notes": "Interactive revise resumes design; fix resumes implement. The shell orchestrator reads stored session_id from workflow-state.json. If missing, Claude may fall back to session name; Codex fails because resume is not reliable without session_id."
+  },
+  "execution": {
+    "skill_order": ["review-requirement", "explore", "design", "review-plan", "revise", "implement", "review-code", "fix", "verify-observability"],
+    "shell_order": ["explore", "design", "review-plan", "revise", "implement", "review-code", "fix"],
+    "shell_excluded": ["review-requirement", "verify-observability"],
+    "notes": "The skill-level flow defines all phases. The shell entry intentionally excludes review-requirement and verify-observability until they are explicitly added."
+  },
+  "naming": {
+    "tokens": ["project_name", "task_name", "workspace_dir", "phase_dir", "phase_id", "phase_name", "round", "timestamp"],
+    "workflow_id_template": "{project_name}-{task_name}-{timestamp}",
+    "workspace_dir_template": "{project_dir}/.workflow/{task_name}",
+    "phase_dir_template": "{workspace_dir}/{phase_id}",
+    "session_name_template": "{task_name}-{phase_name}",
+    "instance_name_template": "{phase_name}",
+    "prompt_file_template": "{phase_dir}/{phase_name}.prompt",
+    "run_script_template": "{phase_dir}/{phase_name}.run.sh",
+    "started_marker_template": "{phase_dir}/{phase_name}.started",
+    "versioned_output_template": "{phase_dir}/{base_name}-r{round}.{ext}",
+    "latest_pointer_template": "{phase_dir}/{latest_file}"
+  },
+  "validation": {
+    "allowed_modes": ["interactive", "subagent"],
+    "allowed_confirm_values": ["required", "optional", "auto"],
+    "allowed_verdicts": ["PASS", "NEEDS_CLARIFICATION", "NEEDS_REVISION", "NEEDS_FIX"],
+    "required_phase_keys": ["id", "display_name", "skill", "mode", "enabled_by_default", "model_key", "instance_name_template", "prompt_file_template"],
+    "unique_phase_ids": true,
+    "reference_fields": ["resume_from", "loop"],
+    "output_contract_keys": ["output", "outputs", "output_pattern", "latest"],
+    "aliases_must_resolve": true,
+    "phase_refs_must_exist": true
+  },
+  "phase_aliases": {
+    "review": "review-plan",
+    "code-review": "review-code"
+  },
+  "artifacts": {
+    "requirement": "requirement.md",
+    "requirement_review": "requirement-review/requirement-review.md",
+    "exploration": "explore/exploration.md",
+    "plan": "design/plan.md",
+    "implementation_brief": "design/implementation-brief.md",
+    "review_latest": "review/review.md",
+    "implementation_notes": "implement/impl-notes.md",
+    "code_review_latest": "review-code/code-review.md",
+    "observability_report": "verify-observability/observability-report.md"
+  },
+  "phases": [
+    {
+      "id": "review-requirement",
+      "display_name": "需求审视",
+      "skill": "review-requirement",
+      "mode": "subagent",
+      "enabled_by_default": true,
+      "model_key": "model_review",
+      "instance_name_template": "review-requirement",
+      "prompt_file_template": "{phase_dir}/{phase_name}.prompt",
+      "output": "requirement-review/requirement-review.md",
+      "verdicts": ["PASS", "NEEDS_CLARIFICATION"],
+      "artifact_check": {
+        "required_keywords": ["审查覆盖与缺口", "VERDICT:"],
+        "verdicts": ["PASS", "NEEDS_CLARIFICATION"]
+      }
+    },
+    {
+      "id": "explore",
+      "display_name": "探索",
+      "skill": "explore",
+      "mode": "interactive",
+      "enabled_by_default": false,
+      "model_key": "model_explore",
+      "instance_name_template": "explore",
+      "prompt_file_template": "{phase_dir}/{phase_name}.prompt",
+      "output": "explore/exploration.md",
+      "confirm": "optional"
+    },
+    {
+      "id": "design",
+      "display_name": "方案设计",
+      "skill": "design",
+      "mode": "interactive",
+      "enabled_by_default": true,
+      "model_key": "model_design",
+      "instance_name_template": "design",
+      "prompt_file_template": "{phase_dir}/{phase_name}.prompt",
+      "outputs": ["design/plan.md", "design/implementation-brief.md"],
+      "artifact_check": {
+        "required_keywords": ["方案概述", "复用分析", "数据模型", "接口设计", "核心流程", "性能评估", "可观测性方案", "实现指引", "风险和待确认项", "实施评估", "设计决策记录", "交付自检"]
+      },
+      "confirm": "required"
+    },
+    {
+      "id": "review-plan",
+      "display_name": "方案评审",
+      "skill": "review-plan",
+      "mode": "subagent",
+      "enabled_by_default": true,
+      "model_key": "model_review",
+      "instance_name_template": "review-plan-r{round}",
+      "prompt_file_template": "{phase_dir}/{phase_name}.prompt",
+      "output_pattern": "review/review-r{round}.md",
+      "latest": "review/review.md",
+      "verdicts": ["PASS", "NEEDS_REVISION"],
+      "artifact_check": {
+        "required_keywords": ["审查覆盖与缺口", "VERDICT:"],
+        "verdicts": ["PASS", "NEEDS_REVISION"]
+      },
+      "transitions": {
+        "PASS": "continue",
+        "NEEDS_REVISION": "revise"
+      },
+      "loop": "design-review"
+    },
+    {
+      "id": "revise",
+      "display_name": "方案修正",
+      "skill": null,
+      "mode": "interactive",
+      "enabled_by_default": "on-review-plan-needs-revision",
+      "model_key": "model_revise",
+      "instance_name_template": "revise-r{round}",
+      "prompt_file_template": "{phase_dir}/{phase_name}.prompt",
+      "resume_from": "design",
+      "output_pattern": "review/revise-notes-r{round}.md",
+      "updates": ["design/plan-r{round}.md", "design/plan.md", "design/implementation-brief.md"],
+      "loop": "design-review"
+    },
+    {
+      "id": "implement",
+      "display_name": "实现",
+      "skill": "implement",
+      "mode": "interactive",
+      "enabled_by_default": true,
+      "model_key": "model_implement",
+      "instance_name_template": "implement",
+      "prompt_file_template": "{phase_dir}/{phase_name}.prompt",
+      "output": "implement/impl-notes.md",
+      "artifact_check": {
+        "required_keywords": ["实现概要", "方案符合度自检", "测试覆盖情况", "已知局限", "plan.md / implementation-brief.md 同步情况", "实现决策记录"]
+      },
+      "confirm": "optional"
+    },
+    {
+      "id": "review-code",
+      "display_name": "代码评审",
+      "skill": "review-code",
+      "mode": "subagent",
+      "enabled_by_default": true,
+      "model_key": "model_review_code",
+      "instance_name_template": "review-code-r{round}",
+      "prompt_file_template": "{phase_dir}/{phase_name}.prompt",
+      "output_pattern": "review-code/code-review-r{round}.md",
+      "latest": "review-code/code-review.md",
+      "verdicts": ["PASS", "NEEDS_FIX"],
+      "artifact_check": {
+        "required_keywords": ["审查覆盖与缺口", "Plan/Brief 同步要求", "VERDICT:"],
+        "verdicts": ["PASS", "NEEDS_FIX"]
+      },
+      "transitions": {
+        "PASS": "continue",
+        "NEEDS_FIX": "fix"
+      },
+      "loop": "code-review-fix"
+    },
+    {
+      "id": "fix",
+      "display_name": "代码修复",
+      "skill": null,
+      "mode": "interactive",
+      "enabled_by_default": "on-review-code-needs-fix",
+      "model_key": "model_fix",
+      "instance_name_template": "fix-r{round}",
+      "prompt_file_template": "{phase_dir}/{phase_name}.prompt",
+      "resume_from": "implement",
+      "output_pattern": "review-code/fix-notes-r{round}.md",
+      "artifact_check": {
+        "required_keywords": ["已修复的问题", "未修复的问题", "plan.md 是否同步更新", "implementation-brief.md 是否同步更新", "测试运行结果"]
+      },
+      "loop": "code-review-fix"
+    },
+    {
+      "id": "verify-observability",
+      "display_name": "可观测性验证",
+      "skill": "verify-observability",
+      "mode": "subagent",
+      "enabled_by_default": "after-code-review-pass",
+      "model_key": "model_review",
+      "instance_name_template": "verify-observability",
+      "prompt_file_template": "{phase_dir}/{phase_name}.prompt",
+      "output": "verify-observability/observability-report.md",
+      "verdicts": ["PASS", "NEEDS_FIX"],
+      "artifact_check": {
+        "required_keywords": ["静态验证结果", "运行时验证结果", "VERDICT:"],
+        "verdicts": ["PASS", "NEEDS_FIX"]
+      }
+    }
+  ]
+}

@@ -1,0 +1,168 @@
+#!/usr/bin/env python3
+import argparse
+import json
+import os
+import sys
+
+
+REQUIRED_KEYWORDS = {
+    "design": [
+        "方案概述",
+        "复用分析",
+        "数据模型",
+        "接口设计",
+        "核心流程",
+        "性能评估",
+        "可观测性方案",
+        "实现指引",
+        "风险和待确认项",
+        "实施评估",
+        "设计决策记录",
+        "交付自检",
+    ],
+    "implementation-brief": [
+        "Objective",
+        "Non-goals",
+        "Required Changes",
+        "Contract Changes",
+        "Cross-repo Sync Points",
+        "Edge Cases",
+        "Tests Required",
+        "Review Checklist",
+    ],
+    "requirement-review": [
+        "审查覆盖与缺口",
+        "VERDICT:",
+    ],
+    "review-plan": [
+        "审查覆盖与缺口",
+        "VERDICT:",
+    ],
+    "review-code": [
+        "审查覆盖与缺口",
+        "Plan/Brief 同步要求",
+        "VERDICT:",
+    ],
+    "implement": [
+        "实现概要",
+        "方案符合度自检",
+        "测试覆盖情况",
+        "已知局限",
+        "plan.md / implementation-brief.md 同步情况",
+        "实现决策记录",
+    ],
+    "fix-notes": [
+        "已修复的问题",
+        "未修复的问题",
+        "plan.md 是否同步更新",
+        "implementation-brief.md 是否同步更新",
+        "测试运行结果",
+    ],
+    "observability-report": [
+        "静态验证结果",
+        "运行时验证结果",
+        "VERDICT:",
+    ],
+}
+
+
+def read_text(path):
+    with open(path, "r", encoding="utf-8") as f:
+        return f.read()
+
+
+def load_manifest(path):
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def resolve_phase(manifest, phase_id):
+    aliases = manifest.get("phase_aliases", {})
+    resolved = aliases.get(phase_id, phase_id)
+    for phase in manifest.get("phases", []):
+        if phase.get("id") == resolved:
+            return phase
+    raise ValueError(f"unknown phase in manifest: {phase_id}")
+
+
+def load_manifest_check(manifest_path, phase_id):
+    phase = resolve_phase(load_manifest(manifest_path), phase_id)
+    check = phase.get("artifact_check", {})
+    return check.get("required_keywords", []), check.get("verdicts", [])
+
+
+def last_nonempty_line(text):
+    for line in reversed(text.splitlines()):
+        line = line.strip()
+        if line:
+            return line
+    return ""
+
+
+def validate_keywords(kind, path, text):
+    missing = [keyword for keyword in REQUIRED_KEYWORDS.get(kind, []) if keyword not in text]
+    if missing:
+        print(
+            f"[ERROR] artifact validation failed: {os.path.basename(path)} missing keywords: {', '.join(missing)}",
+            file=sys.stderr,
+        )
+        return False
+    return True
+
+
+def validate_verdict(path, text, verdicts):
+    if not verdicts:
+        return True
+    line = last_nonempty_line(text)
+    expected = {f"VERDICT: {verdict}" for verdict in verdicts}
+    if line not in expected:
+        print(
+            f"[ERROR] artifact validation failed: {os.path.basename(path)} last non-empty line must be one of: {', '.join(sorted(expected))}",
+            file=sys.stderr,
+        )
+        return False
+    return True
+
+
+def build_parser():
+    parser = argparse.ArgumentParser(description="Validate a j-workflow phase artifact.")
+    parser.add_argument("--kind", required=True, help="Artifact kind, usually the phase skill name.")
+    parser.add_argument("--file", required=True, help="Artifact file to validate.")
+    parser.add_argument("--manifest", help="Optional workflow.json path. When set, validation rules come from phase artifact_check.")
+    parser.add_argument("--phase", help="Phase id to read from manifest. Defaults to --kind.")
+    parser.add_argument(
+        "--verdicts",
+        default="",
+        help="Comma-separated legal VERDICT values. Empty disables verdict-line validation.",
+    )
+    return parser
+
+
+def main():
+    args = build_parser().parse_args()
+    if not os.path.isfile(args.file):
+        print(f"[ERROR] artifact not found: {args.file}", file=sys.stderr)
+        return 1
+
+    text = read_text(args.file)
+    required_keywords = REQUIRED_KEYWORDS.get(args.kind, [])
+    verdicts = [item.strip() for item in args.verdicts.split(",") if item.strip()]
+    if args.manifest:
+        required_keywords, manifest_verdicts = load_manifest_check(args.manifest, args.phase or args.kind)
+        if manifest_verdicts:
+            verdicts = manifest_verdicts
+
+    missing = [keyword for keyword in required_keywords if keyword not in text]
+    if missing:
+        print(
+            f"[ERROR] artifact validation failed: {os.path.basename(args.file)} missing keywords: {', '.join(missing)}",
+            file=sys.stderr,
+        )
+        return 1
+    if not validate_verdict(args.file, text, verdicts):
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

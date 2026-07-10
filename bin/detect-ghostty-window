@@ -1,0 +1,22 @@
+#!/bin/bash
+set -euo pipefail
+
+if ! command -v osascript >/dev/null 2>&1; then
+    exit 0
+fi
+
+window_id="$(osascript -e '
+tell application "Ghostty"
+    if (count of windows) > 0 then
+        return id of window 1
+    else
+        return ""
+    end if
+end tell
+' 2>/dev/null || true)"
+
+if [[ "$window_id" == "not_found" ]]; then
+    window_id=""
+fi
+
+printf '%s\n' "$window_id"

@@ -19,6 +19,7 @@ allowed-tools: ["Read", "Glob", "Grep", "Bash", "Agent", "Write", "Edit", "Skill
 ## 输入
 
 - 方案文档路径（通过参数传入，或 workspace/plan.md）
+- 实现核对索引路径（可选，通过参数传入，如 design/implementation-brief.md）
 - 项目代码（自己读，通过 Glob/Grep/Read 探索）
 
 ## 评审流程
@@ -31,12 +32,45 @@ allowed-tools: ["Read", "Glob", "Grep", "Bash", "Agent", "Write", "Edit", "Skill
 - 数据模型变更
 - 新增的接口/API
 
+如果提供了 `implementation-brief.md`：
+- 先完整阅读 `plan.md`，再阅读 `implementation-brief.md`
+- 将 brief 视为从 plan 派生的 implementation checklist / trace index，不是第二份设计文档
+- brief 中每个 Required Change / Contract Change / Cross-repo Sync Point / Test 都必须能回链到 plan 的具体章节
+- brief 不能补充 plan 中不存在的设计决策；如果 brief 比 plan 更具体，说明 plan 交付不完整，必须标记为问题
+
 ### Step 2: 探索现有系统
 
-用 Agent tool 派发 Explore subagent，了解：
+用结构化代码探索了解现有系统。优先使用 CodeGraph / Grep / Glob / Read 直接定位；如 provider 支持轻量探索子 agent，可按需用于代码定位和摘录，但不要强制指定 Claude 原生 Explore subagent。
+
+需要了解：
 - 方案涉及的模块的现有代码结构
 - 是否已有类似功能或可复用的组件
 - 现有的数据模型和调用关系
+
+### Step 2.5: 提取并验证方案隐含假设
+
+不要把方案中对现有系统的描述当成事实。必须从 plan 中提取所有关于现有代码、数据、接口、异常行为、调用链和限制条件的陈述，逐条读源码或配置验证。
+
+重点提取这些假设：
+- “现有方法不支持/无法处理/会失败”
+- “当前没有类似实现/没有复用点”
+- “需要新增方法/字段/接口才能满足”
+- “现有异常会向上抛出/不会兜底/调用方无法感知”
+- “当前流程只在某状态下执行/不会覆盖某场景”
+- “某配置、枚举、状态、topic、metric 当前不存在”
+
+验证要求：
+- 对方案中提到的现有类/方法，必须读源码确认真实行为。
+- 对“需要新增”的能力，必须找最相近现有实现，用新场景的典型输入推演执行路径。
+- 对异常与兼容性判断，必须追查异常传播链，确认是否已被上层兜住、转换或降级。
+- 对“无复用点”的判断，必须至少搜索关键业务词、接口名、状态/枚举名、相似方法名。
+- 如果验证结果推翻 plan 的前提，必须作为阻塞问题写入报告，并给出代码依据。
+
+在评审报告中增加“隐含假设验证”小节，列出：
+- 假设
+- 验证位置（文件/类/方法）
+- 验证结论
+- 对方案的影响
 
 ### Step 3: 按 Checklist 逐项评审
 
@@ -46,8 +80,9 @@ allowed-tools: ["Read", "Glob", "Grep", "Bash", "Agent", "Write", "Edit", "Skill
 - [ ] 如果有类似实现，方案是否说明了为什么不复用？理由是否成立？
 - [ ] 新增的工具类/通用组件，项目中是否已有等价物？
 - [ ] 是否引入了与现有模式不一致的新模式？（如新的异常处理方式、新的配置方式）
+- [ ] 方案声称现有实现不满足时，是否已读源码验证这个前提，而不是相信方案描述？
 
-**如何检查**：用 Grep 搜索方案中新增类/方法的关键词，看是否已有类似实现。
+**如何检查**：用 Grep 搜索方案中新增类/方法的关键词，看是否已有类似实现。对方案提到的现有方法/类，必须读源码验证真实行为；对相近实现，用新场景的典型输入推演是否已经满足需求。
 
 #### Checklist 2: 数据量级
 
@@ -115,6 +150,21 @@ allowed-tools: ["Read", "Glob", "Grep", "Bash", "Agent", "Write", "Edit", "Skill
 
 **如何检查**：通读全文，重点交叉比对各章节中对同一实体（表、字段、类、方法、接口）的描述是否一致。对经过修正的方案，重点检查修正点涉及的所有章节。
 
+#### Checklist 8: Design 交付完整性与 implementation brief 覆盖
+
+- [ ] `plan.md` 是否足够让一个全新的 implement agent 独立实现，不依赖历史对话、评审记录或 design agent 的记忆？
+- [ ] 用户交互中确认过的选择、边界、暂缓项、忽略项是否都写入 plan 对应章节和设计决策记录？
+- [ ] plan 是否把用户重点关注的问题落到了可实现章节，而不是只在摘要/备注中提到？
+- [ ] 方案是否精确说明了必须修改的模块、类/方法/接口、数据模型、配置、任务、指标、测试，而不是只写抽象方向？
+- [ ] 跨仓库/跨模块/上下游 contract 是否说明 producer、consumer、必须对齐的字段/枚举/状态/错误码/配置 key/metric tag？
+- [ ] 如果提供了 `implementation-brief.md`，brief 是否完整覆盖 plan 中所有实现项？
+- [ ] brief 中每一项是否都能追溯到 plan 的具体章节？
+- [ ] brief 是否包含 plan 中没有的设计决策、字段、接口、状态、配置或测试要求？如有，标记为 design 交付问题，要求回到 plan 修正，而不是让 implement 自行选择。
+- [ ] brief 是否过于模糊（如“修改相关 service”“补充必要测试”）导致无法逐项打勾？
+- [ ] plan 末尾是否有交付自检，且自检结论是否与实际内容一致？
+
+**如何检查**：先从 plan 的数据模型、接口设计、核心流程、配置/任务/MQ、可观测性、测试章节提取实现项，再与 brief 的 Required Changes、Contract Changes、Cross-repo Sync Points、Tests Required 逐项交叉比对。评审结论必须说明 brief 是“覆盖完整 / 缺漏 / 含 plan 外内容”。
+
 ### Step 4: 输出评审报告
 
 输出格式如下，写入 workspace/review.md（或指定路径）：
@@ -163,6 +213,16 @@ allowed-tools: ["Read", "Glob", "Grep", "Bash", "Agent", "Write", "Edit", "Skill
 - 结论：[通过/有问题]
 - 发现：[各章节间不一致的具体点，如字段名不匹配、引用过时等]
 - 建议：[改进建议]
+
+### 8. Design 交付完整性与 implementation brief 覆盖
+- 结论：[通过/有问题/未提供 brief]
+- 发现：[plan 是否足够独立实现；brief 是否完整覆盖 plan；是否有 plan 外内容]
+- 建议：[改进建议]
+
+### 9. 隐含假设验证
+| 假设 | 验证位置 | 结论 | 对方案影响 |
+|------|----------|------|------------|
+| ... | 文件/类/方法 | 成立/不成立/需确认 | ... |
 
 ## 总结
 [总体评价和优先级排序的改进建议]

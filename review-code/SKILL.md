@@ -16,6 +16,7 @@ allowed-tools: ["Read", "Glob", "Grep", "Bash", "Write"]
 3. **少写低价值 checklist** — 不输出大段“通过/不涉及”。没有真实风险的规则不要写进问题。
 4. **先审正确性，再审规范** — 业务正确性、兼容性、数据一致性、并发、性能、安全、测试缺口优先于格式和偏好。
 5. **评审不修改代码** — 只写报告；后续 fix agent 负责修复。
+6. **识别方案回写项** — 如果评审、人工 CR 或修复建议会改变最终方案事实，必须在报告中指出需要同步回 `plan.md` / `implementation-brief.md` 的内容。
 
 ## 输入与模式
 
@@ -45,11 +46,14 @@ allowed-tools: ["Read", "Glob", "Grep", "Bash", "Write"]
    - `git diff --name-only`
    - `git diff --cached --name-only`
    - `git ls-files --others --exclude-standard`
+   - 对每个候选文件先读取 hunk：`git diff --unified=80 -- <file>` 和 `git diff --cached --unified=80 -- <file>`
 4. 如果没有本地变更，再用当前分支与目标分支的 merge-base：
    - 优先 `origin/main`，不存在则 `origin/master`，再退回上游分支。
    - 使用 `git diff --name-only <base>...HEAD` 和 `git diff <base>...HEAD`。
 
-不要使用未定义的 `HEAD~N`。如果无法可靠确定范围，在报告的“审查覆盖与缺口”中写明，并把结论保持谨慎。
+不要使用未定义的 `HEAD~N`。不要只运行 merge-base diff 后因为无输出就停止；本地 workflow 常见是未提交变更，必须检查 `git status --short`、unstaged diff、staged diff、untracked files。遇到 `AD`、`AM`、`MM` 等复合状态时，分别检查 staged 和 unstaged 两份 diff，并在报告中标注。
+
+如果无法可靠确定范围，在报告的“审查覆盖与缺口”中写明，并把结论保持谨慎。
 
 ### Step 2: 理解方案和历史上下文
 
@@ -62,12 +66,14 @@ allowed-tools: ["Read", "Glob", "Grep", "Bash", "Write"]
 - 上轮必须修改项是否真的修复。
 - fix agent 未修复或有争议的点是否有充分理由。
 - 修复是否引入新问题。
+- fix 阶段确认的新细节是否已同步回 plan.md；如只写在 fix-notes 或代码里，标记为需要修复的问题。
 
 ### Step 3: 扩展代码上下文
 
 对每个变更文件，至少做以下上下文扩展。不要把审查停留在 changed hunks。
 
-1. **读完整文件或完整相关类型/函数**：理解变更所在类、函数、状态机和错误处理方式。
+0. **先看 diff hunk**：先用 `git diff --unified=80 -- <file>` / `git diff --cached --unified=80 -- <file>` 理解实际改动，再决定需要哪些上下文。
+1. **读取相关逻辑单元，不默认读完整文件**：理解变更所在类、函数、状态机和错误处理方式，但只读取与变更相关的函数、类片段或邻近代码窗口。
 2. **查调用方和入口**：被改方法/接口/枚举/配置由谁调用，是否有同步/异步入口、定时任务、消息消费、RPC/HTTP 入口。
 3. **查被调方和副作用**：新增或修改的调用会写哪些表、发哪些消息、调哪些外部服务、读写哪些缓存或配置。
 4. **查相似实现**：搜索同业务域内类似功能，比较异常处理、幂等、状态流转、日志、指标、事务边界和测试写法。
@@ -75,6 +81,18 @@ allowed-tools: ["Read", "Glob", "Grep", "Bash", "Write"]
 6. **查配置与资源**：涉及配置、枚举、SQL/XML/DDL、schema、消息 topic、任务配置、权限配置时，读取对应资源文件。
 
 如果项目提供 CodeGraph 或类似结构化索引，优先用它查定义、调用方、被调方和影响面；否则用 `rg`/`git grep` 搜索符号名、字符串常量、接口路径、表名、枚举值和配置 key。
+
+#### Context Budget Rules
+
+Review quality depends on breadth, but context must be bounded.
+
+- Do not use `Read` on a source file over 400 lines unless the file itself is the artifact under review or the whole file is genuinely needed.
+- For large source files, locate symbols first with `rg -n "symbolName|methodName|enumValue|rpcName" <file-or-dir>`.
+- Read narrow line windows with shell commands such as `nl -ba <file> | sed -n '820,940p'`. Prefer 80-200 line windows around changed methods and call sites.
+- If a source file is over 1000 lines, never read it wholesale during the first pass. Read the changed hunk, then at most the containing method/class window, then targeted callers/callees.
+- For generated files, lockfiles, large proto files, SQL dumps, or fixtures, read only symbol definitions or changed hunks unless a blocking issue requires more.
+- If more context is needed, add another targeted window and record why in "审查覆盖与缺口".
+- For multi-repository review, apply the same budget independently per repository; do not read full large files from both repos.
 
 如果变更超过 20 个文件，先按风险分组抽样，但必须完整覆盖：
 - 对外接口和入口文件。
@@ -160,6 +178,11 @@ allowed-tools: ["Read", "Glob", "Grep", "Bash", "Write"]
 - 结果：
 - 未运行项及原因：
 
+## Plan/Brief 同步要求
+- 需要同步到 plan.md 的内容：
+- 需要同步到 implementation-brief.md 的内容：
+- 无需同步的理由（如无需要同步项）：
+
 VERDICT: PASS 或 VERDICT: NEEDS_FIX
 ```
 
@@ -168,6 +191,7 @@ VERDICT: PASS 或 VERDICT: NEEDS_FIX
 - `Non-blocking Suggestions` 只放不阻塞的改进，不影响 VERDICT。
 - 每个 Blocking Finding 必须有代码位置；没有位置的泛泛意见不能阻塞。
 - 如果没有阻塞问题，写“未发现阻塞问题”，不要编造问题。
+- 如果发现代码或 fix-notes 中存在 plan.md 未体现的最终事实，且该事实会影响后续实现/评审/验收，应作为 Blocking Finding，要求同步 plan.md；必要时同步 implementation-brief.md。
 - 最后一行必须是 `VERDICT: PASS` 或 `VERDICT: NEEDS_FIX`，编排器会解析。
 
 ## 裁决规则
