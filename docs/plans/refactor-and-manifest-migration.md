@@ -51,7 +51,7 @@ Phase D（改名，随时可做，建议最后做避免和 C 冲突）:  WP11
 - `--provider claude --config cfg.yaml`（cfg 里 `provider: codex`）→ 生效 claude。
 - `bash -n orchestrate.sh` 通过。
 
-### WP2：评审循环加轮数上限
+### WP2：评审循环加轮数上限 ✅（2026-07-10）
 
 **现状**：`review-plan → revise` 和 `review-code → fix` 都是 `while true` 直到 PASS。`--auto` 模式下断点全关，评审永不 PASS 时无限循环、无限烧 token。
 

@@ -61,6 +61,7 @@ SKIP_PHASES=()
 AUTO_MODE=false
 RESUME_MODE=false
 GHOSTTY_WINDOW_ID=""
+MAX_ROUNDS=3
 
 # Phase breakpoints (default: semi-auto)
 BP_AFTER_EXPLORE=false
@@ -117,6 +118,30 @@ wait_for_user() {
         q|Q) echo "已退出。"; exit 0 ;;
         s|S) return 1 ;;  # signal skip
         *) return 0 ;;
+    esac
+}
+
+handle_loop_limit() {
+    local loop_name="$1"
+    local completed_rounds="$2"
+
+    if [[ "$AUTO_MODE" == true ]]; then
+        log_error "${loop_name} 循环达到上限 ${MAX_ROUNDS} 轮仍未 PASS"
+        state_cmd set-workflow-meta --file "$STATE_FILE" --key loop_exhausted --value "$loop_name"
+        exit 2
+    fi
+
+    echo ""
+    echo -e "${YELLOW}[LOOP LIMIT]${NC} ${loop_name} 已完成 ${completed_rounds} 轮，达到上限 ${MAX_ROUNDS} 轮仍未 PASS。"
+    echo "  c = 继续再跑一轮"
+    echo "  a = 接受当前结果，继续后续阶段"
+    echo "  q = 保存状态并退出（之后可用 --resume）"
+    read -rp "  请选择 [c/a/q]: " choice
+    case "$choice" in
+        c|C) return 0 ;;
+        a|A) return 1 ;;
+        q|Q) echo "已退出。可用 --resume 继续。"; exit 0 ;;
+        *) log_error "未知选择: $choice"; exit 1 ;;
     esac
 }
 
@@ -390,6 +415,7 @@ parse_config() {
             model_implement) MODEL_IMPLEMENT="$value" ;;
             model_review_code) MODEL_REVIEW_CODE="$value" ;;
             model_fix) MODEL_FIX="$value" ;;
+            max_rounds) MAX_ROUNDS="$value" ;;
             explore) PHASE_EXPLORE="$value" ;;
             design) PHASE_DESIGN="$value" ;;
             review_plan) PHASE_REVIEW_PLAN="$value" ;;
@@ -427,6 +453,7 @@ Options:
   --model-implement <model> 实现阶段模型（未指定则继承 --model）
   --model-review-code <model> 代码评审阶段模型（未指定则继承 --model）
   --model-fix <model>     代码修复阶段模型（未指定则继承 --model）
+  --max-rounds <n>        review/revise 和 review-code/fix 循环最大轮数（默认 3）
   --explore               启用探索阶段
   --skip <phase>          跳过指定阶段 (explore/design/review/implement/review-code)
   --auto                  全自动模式（无断点）
@@ -491,6 +518,7 @@ while [[ $# -gt 0 ]]; do
         --model-implement) MODEL_IMPLEMENT="$2"; shift 2 ;;
         --model-review-code) MODEL_REVIEW_CODE="$2"; shift 2 ;;
         --model-fix) MODEL_FIX="$2"; shift 2 ;;
+        --max-rounds) MAX_ROUNDS="$2"; shift 2 ;;
         --explore) PHASE_EXPLORE=true; shift ;;
         --skip)
             case "$2" in
@@ -544,6 +572,11 @@ fi
 
 if [[ -z "$TASK_NAME" ]]; then
     log_error "必须指定 --name <需求名称>（用于 workspace 子目录和 session 命名）"
+    exit 1
+fi
+
+if ! [[ "$MAX_ROUNDS" =~ ^[0-9]+$ ]]; then
+    log_error "--max-rounds 必须是非负整数: $MAX_ROUNDS"
     exit 1
 fi
 
@@ -1048,6 +1081,13 @@ fi
 if [[ "$PHASE_REVIEW_PLAN" == true && "$REVIEW_ALREADY_PASSED" == false ]]; then
     while true; do
         REVIEW_ROUND=$((REVIEW_ROUND + 1))
+        if (( REVIEW_ROUND > MAX_ROUNDS )); then
+            if handle_loop_limit "design-review" "$((REVIEW_ROUND - 1))"; then
+                MAX_ROUNDS="$REVIEW_ROUND"
+            else
+                break
+            fi
+        fi
         state_cmd set-workflow-meta --file "$STATE_FILE" --key current_loop --value "design-review"
         state_cmd set-workflow-meta --file "$STATE_FILE" --key current_round --value "$REVIEW_ROUND"
         REVIEW_OUTPUT="$(phase_artifact_path "review-plan" "primary" "$REVIEW_ROUND")"
@@ -1214,6 +1254,13 @@ fi
 if [[ "$PHASE_REVIEW_CODE" == true && "$CODE_REVIEW_ALREADY_PASSED" == false ]]; then
     while true; do
         CODE_REVIEW_ROUND=$((CODE_REVIEW_ROUND + 1))
+        if (( CODE_REVIEW_ROUND > MAX_ROUNDS )); then
+            if handle_loop_limit "code-review-fix" "$((CODE_REVIEW_ROUND - 1))"; then
+                MAX_ROUNDS="$CODE_REVIEW_ROUND"
+            else
+                break
+            fi
+        fi
         state_cmd set-workflow-meta --file "$STATE_FILE" --key current_loop --value "code-review-fix"
         state_cmd set-workflow-meta --file "$STATE_FILE" --key current_round --value "$CODE_REVIEW_ROUND"
         CODE_REVIEW_OUTPUT="$(phase_artifact_path "review-code" "primary" "$CODE_REVIEW_ROUND")"

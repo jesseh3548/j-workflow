@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Add `--max-rounds` / `max_rounds` to cap review/revise and review-code/fix loops, exiting safely in `--auto` mode when a loop is exhausted (WP2 in `docs/plans/refactor-and-manifest-migration.md`).
 - Fix config precedence so explicit CLI flags override values loaded from `.workflow-config.yaml` (WP1 in `docs/plans/refactor-and-manifest-migration.md`).
 - Fix `parse_config` not stripping inline `#` comments, which made the shipped `workflow-config.example.yaml` silently disable all phase toggles and breakpoints (WP0 in `docs/plans/refactor-and-manifest-migration.md`).
 - Add `docs/plans/refactor-and-manifest-migration.md`: executable work packages for bug fixes (CLI-over-config precedence, review-loop round caps, breakpoint semantics), shared capabilities (workspace archiving, poll-timeout hints, state-driven resume), full manifest-driven migration of `orchestrate.sh`, and the `/workflow` → `/jflow` skill rename.

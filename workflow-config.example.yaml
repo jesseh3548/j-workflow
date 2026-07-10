@@ -33,6 +33,9 @@ project_dir: ~/code/your-project
 # model_review_code: claude-opus-4-6
 # model_fix: claude-sonnet-4-6
 
+# Review/Fix 循环最大轮数（可选，默认 3；CLI --max-rounds 会覆盖）
+# max_rounds: 3
+
 # ── 阶段开关 ──
 # true = 启用, false = 跳过
 

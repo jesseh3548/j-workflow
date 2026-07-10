@@ -127,6 +127,7 @@ Provider support:
 - Use `--provider claude|codex` to select the agent CLI used for phase sessions.
 - Use `--model <model>` to select the model for either provider. Codex defaults to the model in `~/.codex/config.toml` when `--model` is omitted.
 - Use phase-specific model overrides when needed: `--model-explore`, `--model-design`, `--model-review`/`--model-review-plan`, `--model-revise`, `--model-implement`, `--model-review-code`, and `--model-fix`. Unspecified phases inherit `--model`.
+- Use `--max-rounds <n>` to cap review/revise and review-code/fix loops. The default is `3`; `--auto` exits with code `2` when a loop is exhausted.
 - Use `--flow <file>` to select the source workflow template. The orchestrator writes the task-specific run workflow to `<workspace>/workflow.json` and records that path in `workflow-state.json`.
 - `workflow-state.json` is a runtime snapshot. It records the selected run workflow metadata, current/last phase cursors, Ghostty window id, per-phase status, session id, loop, round, transition, prompt path, run script path, and output path.
 - The orchestrator resolves the selected CLI to an absolute path before opening Ghostty tabs. If the CLI is not in a non-interactive shell PATH, set `CLAUDE_BIN` or `CODEX_BIN` to the executable path.
