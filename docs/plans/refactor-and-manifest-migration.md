@@ -29,7 +29,7 @@ Phase D（改名，随时可做，建议最后做避免和 C 冲突）:  WP11
 
 ## Phase A：Bug 修复
 
-### WP1：CLI 参数优先级高于配置文件
+### WP1：CLI 参数优先级高于配置文件 ✅（2026-07-10）
 
 **现状**：`orchestrate.sh` 先解析命令行参数，再 `parse_config`（约 522 行处），导致配置文件的值覆盖显式 CLI flag。只有 `provider` 用 `PROVIDER_FROM_CLI` 打了补丁，其余字段（`model`、`project_dir`、阶段开关、断点开关等）都是 config 赢。
 

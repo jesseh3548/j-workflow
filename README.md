@@ -118,6 +118,8 @@ Or use the workflow skill in a supported agent CLI:
 
 See [`workflow-config.example.yaml`](./workflow-config.example.yaml).
 
+Configuration precedence is: CLI flags > config file > built-in defaults.
+
 ## Claude Code and Codex Support
 
 Provider support:

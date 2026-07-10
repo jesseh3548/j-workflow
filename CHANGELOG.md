@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Fix config precedence so explicit CLI flags override values loaded from `.workflow-config.yaml` (WP1 in `docs/plans/refactor-and-manifest-migration.md`).
 - Fix `parse_config` not stripping inline `#` comments, which made the shipped `workflow-config.example.yaml` silently disable all phase toggles and breakpoints (WP0 in `docs/plans/refactor-and-manifest-migration.md`).
 - Add `docs/plans/refactor-and-manifest-migration.md`: executable work packages for bug fixes (CLI-over-config precedence, review-loop round caps, breakpoint semantics), shared capabilities (workspace archiving, poll-timeout hints, state-driven resume), full manifest-driven migration of `orchestrate.sh`, and the `/workflow` → `/jflow` skill rename.
 - Fix Ghostty phase run scripts failing with `claude: command not found` / `codex: command not found` when the CLI executable is not available in the non-interactive shell PATH. The orchestrator now resolves Claude Code/Codex to an absolute executable path up front and writes that path into generated run scripts.

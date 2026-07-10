@@ -48,7 +48,6 @@ FLOW_TEMPLATE_FILE=""
 FLOW_SCHEMA_VERSION=""
 PROVIDER=""
 PROVIDER_CLI=""
-PROVIDER_FROM_CLI=false
 MODEL="claude-sonnet-4-6"
 MODEL_FROM_USER=false
 MODEL_EXPLORE=""
@@ -382,11 +381,7 @@ parse_config() {
             project_dir) PROJECT_DIR="$value" ;;
             workspace_dir) WORKSPACE_DIR="$value" ;;
             flow_file) FLOW_FILE="$value" ;;
-            provider)
-                if [[ "$PROVIDER_FROM_CLI" != true ]]; then
-                    PROVIDER="$value"
-                fi
-                ;;
+            provider) PROVIDER="$value" ;;
             model) MODEL="$value"; MODEL_FROM_USER=true ;;
             model_explore) MODEL_EXPLORE="$value" ;;
             model_design) MODEL_DESIGN="$value" ;;
@@ -462,6 +457,22 @@ EOF
 # Parse arguments
 # ============================================================
 
+ORIGINAL_ARGS=("$@")
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --config)
+            CONFIG_FILE="$2"
+            shift 2
+            ;;
+        *) shift ;;
+    esac
+done
+
+if [[ -n "$CONFIG_FILE" ]]; then
+    parse_config "$CONFIG_FILE"
+fi
+
+set -- "${ORIGINAL_ARGS[@]}"
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --project) PROJECT_DIR="$2"; shift 2 ;;
@@ -471,7 +482,7 @@ while [[ $# -gt 0 ]]; do
         --config) CONFIG_FILE="$2"; shift 2 ;;
         --workspace) WORKSPACE_DIR="$2"; shift 2 ;;
         --flow) FLOW_FILE="$2"; shift 2 ;;
-        --provider) PROVIDER="$2"; PROVIDER_FROM_CLI=true; shift 2 ;;
+        --provider) PROVIDER="$2"; shift 2 ;;
         --model) MODEL="$2"; MODEL_FROM_USER=true; shift 2 ;;
         --model-explore) MODEL_EXPLORE="$2"; shift 2 ;;
         --model-design) MODEL_DESIGN="$2"; shift 2 ;;
@@ -518,11 +529,6 @@ while [[ $# -gt 0 ]]; do
         *) log_error "未知参数: $1"; usage; exit 1 ;;
     esac
 done
-
-# Load config file if specified
-if [[ -n "$CONFIG_FILE" ]]; then
-    parse_config "$CONFIG_FILE"
-fi
 
 detect_provider
 if [[ "$PROVIDER" == "codex" && "$MODEL_FROM_USER" != true ]]; then
