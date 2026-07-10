@@ -48,6 +48,7 @@ def cmd_init(args):
     })
     state.setdefault("workflow_id", args.workflow_id)
     state.setdefault("created_at", now_iso())
+    # Preserve existing phase records on resume; orchestrate.sh relies on them for state-driven skipping.
     state.setdefault("phases", {})
     save_state(args.file, state)
 
@@ -120,6 +121,14 @@ def cmd_get_phase_field(args):
     cmd_get(args, args.key)
 
 
+def cmd_get_workflow_meta(args):
+    state = load_state(args.file)
+    value = state.get("metadata", {}).get(args.key, "")
+    if value is None:
+        value = ""
+    print(value)
+
+
 def build_parser():
     parser = argparse.ArgumentParser(description="Read and update j-workflow state JSON.")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -188,6 +197,11 @@ def build_parser():
     p.add_argument("--phase", required=True)
     p.add_argument("--key", required=True)
     p.set_defaults(func=cmd_get_phase_field)
+
+    p = sub.add_parser("get-workflow-meta")
+    p.add_argument("--file", required=True)
+    p.add_argument("--key", required=True)
+    p.set_defaults(func=cmd_get_workflow_meta)
 
     return parser
 

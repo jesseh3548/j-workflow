@@ -321,6 +321,10 @@ validate_workflow_state() {
     "$BIN_DIR/validate-workflow-state" "$STATE_FILE" >/dev/null
 }
 
+get_workflow_meta() {
+    state_cmd get-workflow-meta --file "$STATE_FILE" --key "$1" 2>/dev/null || true
+}
+
 validate_workspace_artifacts() {
     if [[ -z "${FLOW_FILE:-}" || ! -f "${FLOW_FILE:-}" ]]; then
         return 0
@@ -766,7 +770,15 @@ if [[ -n "$FLOW_FILE" ]]; then
     state_cmd set-workflow-meta --file "$STATE_FILE" --key source_manifest --value "$FLOW_TEMPLATE_FILE"
 fi
 validate_workflow_state
-validate_workspace_artifacts
+if ! validate_workspace_artifacts; then
+    if [[ "$RESUME_MODE" == true ]]; then
+        log_warn "workspace 产物命名/指针校验失败；resume 模式下继续，让后续阶段修复。"
+        "$BIN_DIR/validate-workspace-artifacts" --manifest "$FLOW_FILE" --workspace "$WORKSPACE_DIR" || true
+    else
+        log_error "workspace 产物命名/指针校验失败，请修订 $WORKSPACE_DIR"
+        exit 1
+    fi
+fi
 
 # Copy requirement to workspace root (if provided)
 if [[ -n "$REQUIREMENT_FILE" ]]; then
@@ -1081,22 +1093,33 @@ PROMPTEOF
     log_success "$phase_name 完成 → $output_file"
 }
 
-# Resume 检查：如果产出文件已存在，跳过该阶段
+# Resume 检查：state 已完成/跳过、产出存在且产物校验通过时才跳过该阶段
 # 用法: should_skip_phase "phase_name" "output_file" && skip
 should_skip_phase() {
     local phase_name="$1"
     local output_file="$2"
-    if [[ "$RESUME_MODE" == true && -f "$output_file" ]]; then
-        log_info "跳过 ${phase_name}（已有产出: $(basename "$output_file")）"
-        state_cmd phase-finish \
-            --file "$STATE_FILE" \
-            --phase "$phase_name" \
-            --status "skipped" \
-            --exit-code "0" \
-            --output-file "$output_file"
-        return 0
+    local artifact_kind="${3:-$phase_name}"
+    local phase_status
+    if [[ "$RESUME_MODE" != true ]]; then
+        return 1
     fi
-    return 1
+
+    phase_status="$(state_cmd get-phase-status --file "$STATE_FILE" --phase "$phase_name" 2>/dev/null || true)"
+    if [[ "$phase_status" != "done" && "$phase_status" != "skipped" ]]; then
+        log_info "不跳过 ${phase_name}（state status=${phase_status:-missing}）"
+        return 1
+    fi
+    if [[ ! -f "$output_file" ]]; then
+        log_info "不跳过 ${phase_name}（缺少产出: $output_file）"
+        return 1
+    fi
+    if ! validate_phase_artifact "$artifact_kind" "$output_file"; then
+        log_warn "不跳过 ${phase_name}（产物校验失败: $output_file）"
+        return 1
+    fi
+
+    log_info "跳过 ${phase_name}（state=${phase_status}，产物已校验: $(basename "$output_file")）"
+    return 0
 }
 
 # ── Phase 1: Explore ──
@@ -1171,11 +1194,31 @@ fi
 
 REVIEW_ROUND=0
 REVIEW_LATEST="$(phase_artifact_path "review-plan" "latest")"
+REVIEW_RESUME_REVISE_ROUND=0
 
 REVIEW_ALREADY_PASSED=false
-if [[ "$RESUME_MODE" == true && -f "$REVIEW_LATEST" ]] && artifact_verdict_is_pass "$REVIEW_LATEST"; then
-    log_info "跳过 review（已有 VERDICT: PASS）"
-    REVIEW_ALREADY_PASSED=true
+if [[ "$RESUME_MODE" == true && -f "$REVIEW_LATEST" ]]; then
+    if validate_phase_artifact "review-plan" "$REVIEW_LATEST" && artifact_verdict_is_pass "$REVIEW_LATEST"; then
+        log_info "跳过 review（已有已校验 VERDICT: PASS）"
+        REVIEW_ALREADY_PASSED=true
+    else
+        REVIEW_TRANSITION_RESUME="$(phase_transition_for_artifact "review-plan" "$REVIEW_LATEST" 2>/dev/null || true)"
+        if [[ "$REVIEW_TRANSITION_RESUME" == "revise" ]]; then
+            REVIEW_META_LOOP="$(get_workflow_meta current_loop)"
+            REVIEW_META_ROUND="$(get_workflow_meta current_round)"
+            if [[ "$REVIEW_META_LOOP" == "design-review" && "$REVIEW_META_ROUND" =~ ^[0-9]+$ && "$REVIEW_META_ROUND" -gt 0 ]]; then
+                REVISE_RESUME_OUTPUT="$(phase_artifact_path "revise" "primary" "$REVIEW_META_ROUND")"
+                if [[ -f "$REVISE_RESUME_OUTPUT" ]] && validate_phase_artifact "revise" "$REVISE_RESUME_OUTPUT"; then
+                    REVIEW_ROUND="$REVIEW_META_ROUND"
+                    log_info "resume: 第${REVIEW_META_ROUND}轮 revise 已存在，下一步从第$((REVIEW_META_ROUND + 1))轮 review-plan 继续"
+                else
+                    REVIEW_ROUND=$((REVIEW_META_ROUND - 1))
+                    REVIEW_RESUME_REVISE_ROUND="$REVIEW_META_ROUND"
+                    log_info "resume: 第${REVIEW_META_ROUND}轮 review-plan 已要求修正，直接进入 revise-r${REVIEW_META_ROUND}"
+                fi
+            fi
+        fi
+    fi
 fi
 
 if [[ "$PHASE_REVIEW_PLAN" == true && "$REVIEW_ALREADY_PASSED" == false ]]; then
@@ -1194,17 +1237,24 @@ if [[ "$PHASE_REVIEW_PLAN" == true && "$REVIEW_ALREADY_PASSED" == false ]]; then
         REVISE_OUTPUT="$(phase_artifact_path "revise" "primary" "$REVIEW_ROUND")"
         PLAN_ROUND_OUTPUT="$DIR_DESIGN/plan-r${REVIEW_ROUND}.md"
 
-        log_phase "3" "方案评审 第${REVIEW_ROUND}轮 (/review-plan)"
+        if [[ "$REVIEW_RESUME_REVISE_ROUND" == "$REVIEW_ROUND" ]]; then
+            log_phase "3" "方案评审 第${REVIEW_ROUND}轮已完成（resume）"
+            if [[ ! -f "$REVIEW_OUTPUT" && -f "$REVIEW_LATEST" ]]; then
+                cp "$REVIEW_LATEST" "$REVIEW_OUTPUT"
+            fi
+            REVIEW_TRANSITION="revise"
+        else
+            log_phase "3" "方案评审 第${REVIEW_ROUND}轮 (/review-plan)"
 
-        # 构建评审上下文：第 2 轮起告知评审者这是复审
-        REVIEW_CONTEXT=""
-        if [[ $REVIEW_ROUND -gt 1 ]]; then
-            PREV_REVIEW_OUTPUT="$(phase_artifact_path "review-plan" "primary" "$((REVIEW_ROUND-1))")"
-            PREV_REVISE_OUTPUT="$(phase_artifact_path "revise" "primary" "$((REVIEW_ROUND-1))")"
-            REVIEW_CONTEXT="这是第${REVIEW_ROUND}轮评审。上一轮评审报告在 $PREV_REVIEW_OUTPUT，方案修正说明在 $PREV_REVISE_OUTPUT。请重点验证上轮提出的问题是否已修正到位，同时检查修正是否引入新问题。"
-        fi
+            # 构建评审上下文：第 2 轮起告知评审者这是复审
+            REVIEW_CONTEXT=""
+            if [[ $REVIEW_ROUND -gt 1 ]]; then
+                PREV_REVIEW_OUTPUT="$(phase_artifact_path "review-plan" "primary" "$((REVIEW_ROUND-1))")"
+                PREV_REVISE_OUTPUT="$(phase_artifact_path "revise" "primary" "$((REVIEW_ROUND-1))")"
+                REVIEW_CONTEXT="这是第${REVIEW_ROUND}轮评审。上一轮评审报告在 $PREV_REVIEW_OUTPUT，方案修正说明在 $PREV_REVISE_OUTPUT。请重点验证上轮提出的问题是否已修正到位，同时检查修正是否引入新问题。"
+            fi
 
-        run_analysis_phase "review-plan-r${REVIEW_ROUND}" "review-plan" \
+            run_analysis_phase "review-plan-r${REVIEW_ROUND}" "review-plan" \
             "调用 /review-plan skill。
 
 上下文参数：
@@ -1224,17 +1274,18 @@ if [[ "$PHASE_REVIEW_PLAN" == true && "$REVIEW_ALREADY_PASSED" == false ]]; then
 最后必须给出一行总体裁决（这一行会被自动解析，格式必须严格）：
 - 如果所有项都通过：VERDICT: PASS
 - 如果有任何项需要修改：VERDICT: NEEDS_REVISION" \
-            "$REVIEW_OUTPUT" "$DIR_REVIEW"
+                "$REVIEW_OUTPUT" "$DIR_REVIEW"
 
-        # 保持 review.md 始终指向最新版
-        cp "$REVIEW_OUTPUT" "$REVIEW_LATEST" 2>/dev/null || true
-        if ! validate_workspace_artifacts; then
-            log_error "review-plan 完成后 workspace 产物命名/指针校验失败，请修订 $WORKSPACE_DIR"
-            exit 1
+            # 保持 review.md 始终指向最新版
+            cp "$REVIEW_OUTPUT" "$REVIEW_LATEST" 2>/dev/null || true
+            if ! validate_workspace_artifacts; then
+                log_error "review-plan 完成后 workspace 产物命名/指针校验失败，请修订 $WORKSPACE_DIR"
+                exit 1
+            fi
+
+            # 检查评审结论
+            REVIEW_TRANSITION="$(phase_transition_for_artifact "review-plan" "$REVIEW_OUTPUT")"
         fi
-
-        # 检查评审结论
-        REVIEW_TRANSITION="$(phase_transition_for_artifact "review-plan" "$REVIEW_OUTPUT")"
         state_cmd set-phase-field --file "$STATE_FILE" --phase "review-plan-r${REVIEW_ROUND}" --key round --value "$REVIEW_ROUND"
         state_cmd set-phase-field --file "$STATE_FILE" --phase "review-plan-r${REVIEW_ROUND}" --key loop --value "design-review"
         state_cmd set-phase-field --file "$STATE_FILE" --phase "review-plan-r${REVIEW_ROUND}" --key transition --value "$REVIEW_TRANSITION"
@@ -1248,7 +1299,7 @@ if [[ "$PHASE_REVIEW_PLAN" == true && "$REVIEW_ALREADY_PASSED" == false ]]; then
         fi
 
         # 断点：让用户看评审结果
-        if [[ "$BP_AFTER_REVIEW" == true ]]; then
+        if [[ "$BP_AFTER_REVIEW" == true && "$REVIEW_RESUME_REVISE_ROUND" != "$REVIEW_ROUND" ]]; then
             wait_for_user "第${REVIEW_ROUND}轮评审完成，方案需要修正" "$REVIEW_OUTPUT" "接受当前方案，跳过修正并进入实现"
             if [[ "$WAIT_CHOICE" == "accept" ]]; then
                 break
@@ -1350,11 +1401,31 @@ fi
 
 CODE_REVIEW_ROUND=0
 CODE_REVIEW_LATEST="$(phase_artifact_path "review-code" "latest")"
+CODE_REVIEW_RESUME_FIX_ROUND=0
 
 CODE_REVIEW_ALREADY_PASSED=false
-if [[ "$RESUME_MODE" == true && -f "$CODE_REVIEW_LATEST" ]] && artifact_verdict_is_pass "$CODE_REVIEW_LATEST"; then
-    log_info "跳过 review-code（已有 VERDICT: PASS）"
-    CODE_REVIEW_ALREADY_PASSED=true
+if [[ "$RESUME_MODE" == true && -f "$CODE_REVIEW_LATEST" ]]; then
+    if validate_phase_artifact "review-code" "$CODE_REVIEW_LATEST" && artifact_verdict_is_pass "$CODE_REVIEW_LATEST"; then
+        log_info "跳过 review-code（已有已校验 VERDICT: PASS）"
+        CODE_REVIEW_ALREADY_PASSED=true
+    else
+        CODE_REVIEW_TRANSITION_RESUME="$(phase_transition_for_artifact "review-code" "$CODE_REVIEW_LATEST" 2>/dev/null || true)"
+        if [[ "$CODE_REVIEW_TRANSITION_RESUME" == "fix" ]]; then
+            CODE_REVIEW_META_LOOP="$(get_workflow_meta current_loop)"
+            CODE_REVIEW_META_ROUND="$(get_workflow_meta current_round)"
+            if [[ "$CODE_REVIEW_META_LOOP" == "code-review-fix" && "$CODE_REVIEW_META_ROUND" =~ ^[0-9]+$ && "$CODE_REVIEW_META_ROUND" -gt 0 ]]; then
+                FIX_RESUME_OUTPUT="$(phase_artifact_path "fix" "primary" "$CODE_REVIEW_META_ROUND")"
+                if [[ -f "$FIX_RESUME_OUTPUT" ]] && validate_phase_artifact "fix" "$FIX_RESUME_OUTPUT"; then
+                    CODE_REVIEW_ROUND="$CODE_REVIEW_META_ROUND"
+                    log_info "resume: 第${CODE_REVIEW_META_ROUND}轮 fix 已存在，下一步从第$((CODE_REVIEW_META_ROUND + 1))轮 review-code 继续"
+                else
+                    CODE_REVIEW_ROUND=$((CODE_REVIEW_META_ROUND - 1))
+                    CODE_REVIEW_RESUME_FIX_ROUND="$CODE_REVIEW_META_ROUND"
+                    log_info "resume: 第${CODE_REVIEW_META_ROUND}轮 review-code 已要求修复，直接进入 fix-r${CODE_REVIEW_META_ROUND}"
+                fi
+            fi
+        fi
+    fi
 fi
 
 if [[ "$PHASE_REVIEW_CODE" == true && "$CODE_REVIEW_ALREADY_PASSED" == false ]]; then
@@ -1372,17 +1443,24 @@ if [[ "$PHASE_REVIEW_CODE" == true && "$CODE_REVIEW_ALREADY_PASSED" == false ]];
         CODE_REVIEW_OUTPUT="$(phase_artifact_path "review-code" "primary" "$CODE_REVIEW_ROUND")"
         FIX_OUTPUT="$(phase_artifact_path "fix" "primary" "$CODE_REVIEW_ROUND")"
 
-        log_phase "5" "代码评审 第${CODE_REVIEW_ROUND}轮 (/review-code)"
+        if [[ "$CODE_REVIEW_RESUME_FIX_ROUND" == "$CODE_REVIEW_ROUND" ]]; then
+            log_phase "5" "代码评审 第${CODE_REVIEW_ROUND}轮已完成（resume）"
+            if [[ ! -f "$CODE_REVIEW_OUTPUT" && -f "$CODE_REVIEW_LATEST" ]]; then
+                cp "$CODE_REVIEW_LATEST" "$CODE_REVIEW_OUTPUT"
+            fi
+            CODE_REVIEW_TRANSITION="fix"
+        else
+            log_phase "5" "代码评审 第${CODE_REVIEW_ROUND}轮 (/review-code)"
 
-        # 构建评审上下文：第 2 轮起告知评审者这是复审
-        CODE_REVIEW_CONTEXT=""
-        if [[ $CODE_REVIEW_ROUND -gt 1 ]]; then
-            PREV_CODE_REVIEW_OUTPUT="$(phase_artifact_path "review-code" "primary" "$((CODE_REVIEW_ROUND-1))")"
-            PREV_FIX_OUTPUT="$(phase_artifact_path "fix" "primary" "$((CODE_REVIEW_ROUND-1))")"
-            CODE_REVIEW_CONTEXT="这是第${CODE_REVIEW_ROUND}轮代码评审。上一轮评审报告在 $PREV_CODE_REVIEW_OUTPUT，修复说明在 $PREV_FIX_OUTPUT。请重点验证上轮提出的必须修改项是否已修复到位，同时检查修复是否引入新问题。"
-        fi
+            # 构建评审上下文：第 2 轮起告知评审者这是复审
+            CODE_REVIEW_CONTEXT=""
+            if [[ $CODE_REVIEW_ROUND -gt 1 ]]; then
+                PREV_CODE_REVIEW_OUTPUT="$(phase_artifact_path "review-code" "primary" "$((CODE_REVIEW_ROUND-1))")"
+                PREV_FIX_OUTPUT="$(phase_artifact_path "fix" "primary" "$((CODE_REVIEW_ROUND-1))")"
+                CODE_REVIEW_CONTEXT="这是第${CODE_REVIEW_ROUND}轮代码评审。上一轮评审报告在 $PREV_CODE_REVIEW_OUTPUT，修复说明在 $PREV_FIX_OUTPUT。请重点验证上轮提出的必须修改项是否已修复到位，同时检查修复是否引入新问题。"
+            fi
 
-        run_analysis_phase "review-code-r${CODE_REVIEW_ROUND}" "review-code" \
+            run_analysis_phase "review-code-r${CODE_REVIEW_ROUND}" "review-code" \
             "调用 /review-code skill（对照方案模式）。
 
 上下文参数：
@@ -1396,17 +1474,18 @@ if [[ "$PHASE_REVIEW_CODE" == true && "$CODE_REVIEW_ALREADY_PASSED" == false ]];
 最后必须给出一行总体裁决（这一行会被自动解析，格式必须严格）：
 - 如果所有必须修改的问题都已解决或无必须修改项：VERDICT: PASS
 - 如果有必须修改的问题：VERDICT: NEEDS_FIX" \
-            "$CODE_REVIEW_OUTPUT" "$DIR_REVIEW_CODE"
+                "$CODE_REVIEW_OUTPUT" "$DIR_REVIEW_CODE"
 
-        # 保持 code-review.md 始终指向最新版
-        cp "$CODE_REVIEW_OUTPUT" "$CODE_REVIEW_LATEST" 2>/dev/null || true
-        if ! validate_workspace_artifacts; then
-            log_error "review-code 完成后 workspace 产物命名/指针校验失败，请修订 $WORKSPACE_DIR"
-            exit 1
+            # 保持 code-review.md 始终指向最新版
+            cp "$CODE_REVIEW_OUTPUT" "$CODE_REVIEW_LATEST" 2>/dev/null || true
+            if ! validate_workspace_artifacts; then
+                log_error "review-code 完成后 workspace 产物命名/指针校验失败，请修订 $WORKSPACE_DIR"
+                exit 1
+            fi
+
+            # 检查评审结论
+            CODE_REVIEW_TRANSITION="$(phase_transition_for_artifact "review-code" "$CODE_REVIEW_OUTPUT")"
         fi
-
-        # 检查评审结论
-        CODE_REVIEW_TRANSITION="$(phase_transition_for_artifact "review-code" "$CODE_REVIEW_OUTPUT")"
         state_cmd set-phase-field --file "$STATE_FILE" --phase "review-code-r${CODE_REVIEW_ROUND}" --key round --value "$CODE_REVIEW_ROUND"
         state_cmd set-phase-field --file "$STATE_FILE" --phase "review-code-r${CODE_REVIEW_ROUND}" --key loop --value "code-review-fix"
         state_cmd set-phase-field --file "$STATE_FILE" --phase "review-code-r${CODE_REVIEW_ROUND}" --key transition --value "$CODE_REVIEW_TRANSITION"
@@ -1420,7 +1499,7 @@ if [[ "$PHASE_REVIEW_CODE" == true && "$CODE_REVIEW_ALREADY_PASSED" == false ]];
         fi
 
         # 断点：让用户看评审结果
-        if [[ "$BP_AFTER_REVIEW_CODE" == true ]]; then
+        if [[ "$BP_AFTER_REVIEW_CODE" == true && "$CODE_REVIEW_RESUME_FIX_ROUND" != "$CODE_REVIEW_ROUND" ]]; then
             wait_for_user "第${CODE_REVIEW_ROUND}轮代码评审完成，代码需要修复" "$CODE_REVIEW_OUTPUT" "接受当前代码，跳过修复并结束评审循环"
             if [[ "$WAIT_CHOICE" == "accept" ]]; then
                 break

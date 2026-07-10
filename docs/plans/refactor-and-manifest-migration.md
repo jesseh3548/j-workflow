@@ -188,7 +188,7 @@ Phase D（改名，随时可做，建议最后做避免和 C 冲突）:  WP11
 
 **验收**：手动启动一个阶段不写完成状态，观察 5 分钟出现一次提示；按提示手动 `phase-finish` 后编排器正常推进；`--phase-timeout 1` 时 1 分钟后失败退出且 state 记录 failed。
 
-### WP6：resume 判定升级为 state + 校验驱动
+### WP6：resume 判定升级为 state + 校验驱动 ✅（2026-07-10）
 
 **现状**：`should_skip_phase` 只看输出文件是否存在。产物校验失败 exit 1 后输出文件仍在，`--resume` 会跳过恰恰有问题的阶段；而启动时的 `validate_workspace_artifacts` 又会因同一问题退出，恢复只能手工改文件。
 
