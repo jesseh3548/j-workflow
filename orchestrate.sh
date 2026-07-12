@@ -789,7 +789,13 @@ elif [[ -n "$FLOW_TEMPLATE_FILE" ]]; then
         --task-name "$TASK_NAME"
         --provider "$PROVIDER"
         --model "$(model_for_state "$MODEL")"
+        --max-rounds "$MAX_ROUNDS"
     )
+    if [[ "$BP_AFTER_EXPLORE" == true ]]; then CREATE_FLOW_ARGS+=(--break explore); else CREATE_FLOW_ARGS+=(--no-break explore); fi
+    if [[ "$BP_AFTER_DESIGN" == true ]]; then CREATE_FLOW_ARGS+=(--break design); else CREATE_FLOW_ARGS+=(--no-break design); fi
+    if [[ "$BP_AFTER_REVIEW" == true ]]; then CREATE_FLOW_ARGS+=(--break review-plan); else CREATE_FLOW_ARGS+=(--no-break review-plan); fi
+    if [[ "$BP_AFTER_IMPLEMENT" == true ]]; then CREATE_FLOW_ARGS+=(--break implement); else CREATE_FLOW_ARGS+=(--no-break implement); fi
+    if [[ "$BP_AFTER_REVIEW_CODE" == true ]]; then CREATE_FLOW_ARGS+=(--break review-code); else CREATE_FLOW_ARGS+=(--no-break review-code); fi
     if [[ "$PHASE_EXPLORE" == true ]]; then
         CREATE_FLOW_ARGS+=(--enable explore)
     else
@@ -826,6 +832,18 @@ if [[ -n "$FLOW_FILE" ]]; then
             review-code) PHASE_REVIEW_CODE=true ;;
         esac
     done < <("$BIN_DIR/workflow-manifest" execution-order --file "$FLOW_FILE" --kind order)
+
+    FLOW_MAX_ROUNDS="$("$BIN_DIR/workflow-manifest" execution-get --file "$FLOW_FILE" --key max_rounds 2>/dev/null || true)"
+    if [[ "$FLOW_MAX_ROUNDS" =~ ^[0-9]+$ ]]; then
+        MAX_ROUNDS="$FLOW_MAX_ROUNDS"
+    fi
+    if "$BIN_DIR/workflow-manifest" phase-get --file "$FLOW_FILE" --phase design --field breakpoint_after >/dev/null 2>&1; then
+        BP_AFTER_EXPLORE="$("$BIN_DIR/workflow-manifest" breakpoint-after --file "$FLOW_FILE" --phase explore)"
+        BP_AFTER_DESIGN="$("$BIN_DIR/workflow-manifest" breakpoint-after --file "$FLOW_FILE" --phase design)"
+        BP_AFTER_REVIEW="$("$BIN_DIR/workflow-manifest" breakpoint-after --file "$FLOW_FILE" --phase review-plan)"
+        BP_AFTER_IMPLEMENT="$("$BIN_DIR/workflow-manifest" breakpoint-after --file "$FLOW_FILE" --phase implement)"
+        BP_AFTER_REVIEW_CODE="$("$BIN_DIR/workflow-manifest" breakpoint-after --file "$FLOW_FILE" --phase review-code)"
+    fi
 fi
 
 state_cmd init \

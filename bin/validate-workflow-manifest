@@ -44,6 +44,7 @@ def main():
 
     validation = data["validation"]
     allowed_modes = set(validation.get("allowed_modes", []))
+    allowed_runners = set(validation.get("allowed_runners", []))
     allowed_confirms = set(validation.get("allowed_confirm_values", []))
     allowed_verdicts = set(validation.get("allowed_verdicts", []))
     required_phase_keys = validation.get("required_phase_keys", [])
@@ -53,6 +54,8 @@ def main():
 
     phase_map = {}
     has_prompt_templates = any("prompt_template" in phase for phase in data["phases"] if isinstance(phase, dict))
+    has_runners = any("runner" in phase for phase in data["phases"] if isinstance(phase, dict))
+    has_breakpoints = any("breakpoint_after" in phase for phase in data["phases"] if isinstance(phase, dict))
     for phase in data["phases"]:
         if not isinstance(phase, dict):
             raise ValueError("each phase must be a JSON object")
@@ -66,6 +69,14 @@ def main():
     for phase in data["phases"]:
         if allowed_modes and phase["mode"] not in allowed_modes:
             raise ValueError(f"phase {phase['id']} has invalid mode: {phase['mode']}")
+        if has_runners and "runner" not in phase:
+            raise ValueError(f"phase {phase['id']} missing runner")
+        if "runner" in phase and allowed_runners and phase["runner"] not in allowed_runners:
+            raise ValueError(f"phase {phase['id']} has invalid runner: {phase['runner']}")
+        if has_breakpoints and "breakpoint_after" not in phase:
+            raise ValueError(f"phase {phase['id']} missing breakpoint_after")
+        if "breakpoint_after" in phase and not isinstance(phase["breakpoint_after"], bool):
+            raise ValueError(f"phase {phase['id']} breakpoint_after must be a boolean")
         if "confirm" in phase and phase["confirm"] not in allowed_confirms:
             raise ValueError(f"phase {phase['id']} has invalid confirm value: {phase['confirm']}")
         if "verdicts" in phase:
@@ -117,6 +128,19 @@ def main():
     execution = data["execution"]
     if not isinstance(execution, dict):
         raise ValueError("execution must be an object")
+    if "max_rounds" in execution:
+        max_rounds = execution["max_rounds"]
+        if not isinstance(max_rounds, int) or max_rounds < 0:
+            raise ValueError("execution.max_rounds must be a non-negative integer")
+    if "breakpoints" in execution:
+        breakpoints = execution["breakpoints"]
+        if not isinstance(breakpoints, dict):
+            raise ValueError("execution.breakpoints must be an object")
+        for phase_id, enabled in breakpoints.items():
+            if phase_id not in phase_map:
+                raise ValueError(f"execution.breakpoints references unknown phase: {phase_id}")
+            if not isinstance(enabled, bool):
+                raise ValueError(f"execution.breakpoints.{phase_id} must be a boolean")
     for key in ("skill_order", "shell_order", "shell_excluded"):
         values = execution.get(key)
         if not isinstance(values, list) or not all(isinstance(item, str) for item in values):
@@ -140,6 +164,23 @@ def main():
         overlap = set(values) & set(disabled)
         if overlap:
             raise ValueError(f"run workflow phases cannot be both ordered and disabled: {', '.join(sorted(overlap))}")
+
+    loops = data.get("loops", {})
+    if loops:
+        if not isinstance(loops, dict):
+            raise ValueError("loops must be an object")
+        for loop_name, loop in loops.items():
+            if not isinstance(loop, dict):
+                raise ValueError(f"loop {loop_name} must be an object")
+            review_phase = loop.get("review_phase")
+            fixup_phase = loop.get("fixup_phase")
+            max_rounds = loop.get("max_rounds")
+            if review_phase not in phase_map:
+                raise ValueError(f"loop {loop_name} review_phase references unknown phase: {review_phase}")
+            if fixup_phase not in phase_map:
+                raise ValueError(f"loop {loop_name} fixup_phase references unknown phase: {fixup_phase}")
+            if not isinstance(max_rounds, int) or max_rounds <= 0:
+                raise ValueError(f"loop {loop_name} max_rounds must be a positive integer")
 
     for alias, target in data["phase_aliases"].items():
         if not isinstance(alias, str) or not isinstance(target, str):

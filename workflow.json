@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "name": "j-workflow-default",
   "description": "Default j-workflow phase manifest. This file is the strict execution contract for phase naming, templates, resume policy, and artifact metadata. orchestrate.sh still owns execution.",
   "defaults": {
@@ -20,6 +20,18 @@
     "shell_excluded": ["review-requirement", "verify-observability"],
     "notes": "The skill-level flow defines all phases. The shell entry intentionally excludes review-requirement and verify-observability until they are explicitly added."
   },
+  "loops": {
+    "design-review": {
+      "review_phase": "review-plan",
+      "fixup_phase": "revise",
+      "max_rounds": 3
+    },
+    "code-review-fix": {
+      "review_phase": "review-code",
+      "fixup_phase": "fix",
+      "max_rounds": 3
+    }
+  },
   "naming": {
     "tokens": ["project_name", "task_name", "workspace_dir", "phase_dir", "phase_id", "phase_name", "round", "timestamp"],
     "workflow_id_template": "{project_name}-{task_name}-{timestamp}",
@@ -35,6 +47,7 @@
   },
   "validation": {
     "allowed_modes": ["interactive", "subagent"],
+    "allowed_runners": ["interactive", "noninteractive"],
     "allowed_confirm_values": ["required", "optional", "auto"],
     "allowed_verdicts": ["PASS", "NEEDS_CLARIFICATION", "NEEDS_REVISION", "NEEDS_FIX"],
     "required_phase_keys": ["id", "display_name", "skill", "mode", "enabled_by_default", "model_key", "instance_name_template", "prompt_file_template"],
@@ -65,6 +78,8 @@
       "display_name": "需求审视",
       "skill": "review-requirement",
       "mode": "subagent",
+      "runner": "noninteractive",
+      "breakpoint_after": false,
       "enabled_by_default": true,
       "model_key": "model_review",
       "instance_name_template": "review-requirement",
@@ -82,6 +97,8 @@
       "display_name": "探索",
       "skill": "explore",
       "mode": "interactive",
+      "runner": "interactive",
+      "breakpoint_after": false,
       "enabled_by_default": false,
       "model_key": "model_explore",
       "instance_name_template": "explore",
@@ -95,6 +112,8 @@
       "display_name": "方案设计",
       "skill": "design",
       "mode": "interactive",
+      "runner": "interactive",
+      "breakpoint_after": true,
       "enabled_by_default": true,
       "model_key": "model_design",
       "instance_name_template": "design",
@@ -111,6 +130,8 @@
       "display_name": "方案评审",
       "skill": "review-plan",
       "mode": "subagent",
+      "runner": "noninteractive",
+      "breakpoint_after": true,
       "enabled_by_default": true,
       "model_key": "model_review",
       "instance_name_template": "review-plan-r{round}",
@@ -134,6 +155,8 @@
       "display_name": "方案修正",
       "skill": null,
       "mode": "interactive",
+      "runner": "interactive",
+      "breakpoint_after": false,
       "enabled_by_default": "on-review-plan-needs-revision",
       "model_key": "model_revise",
       "instance_name_template": "revise-r{round}",
@@ -149,6 +172,8 @@
       "display_name": "实现",
       "skill": "implement",
       "mode": "interactive",
+      "runner": "interactive",
+      "breakpoint_after": false,
       "enabled_by_default": true,
       "model_key": "model_implement",
       "instance_name_template": "implement",
@@ -165,6 +190,8 @@
       "display_name": "代码评审",
       "skill": "review-code",
       "mode": "subagent",
+      "runner": "noninteractive",
+      "breakpoint_after": true,
       "enabled_by_default": true,
       "model_key": "model_review_code",
       "instance_name_template": "review-code-r{round}",
@@ -188,6 +215,8 @@
       "display_name": "代码修复",
       "skill": null,
       "mode": "interactive",
+      "runner": "interactive",
+      "breakpoint_after": false,
       "enabled_by_default": "on-review-code-needs-fix",
       "model_key": "model_fix",
       "instance_name_template": "fix-r{round}",
@@ -205,6 +234,8 @@
       "display_name": "可观测性验证",
       "skill": "verify-observability",
       "mode": "subagent",
+      "runner": "noninteractive",
+      "breakpoint_after": false,
       "enabled_by_default": "after-code-review-pass",
       "model_key": "model_review",
       "instance_name_template": "verify-observability",

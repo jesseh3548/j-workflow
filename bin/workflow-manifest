@@ -80,6 +80,26 @@ def cmd_execution_order(args):
     return 0
 
 
+def cmd_execution_get(args):
+    manifest = load_manifest(args.file)
+    value = manifest.get("execution", {}).get(args.key)
+    if value is None:
+        return 1
+    print_value(value)
+    return 0
+
+
+def cmd_breakpoint_after(args):
+    manifest = load_manifest(args.file)
+    phase = get_phase(manifest, args.phase)
+    breakpoints = manifest.get("execution", {}).get("breakpoints", {})
+    if args.phase in breakpoints:
+        print("true" if breakpoints[args.phase] else "false")
+    else:
+        print("true" if phase.get("breakpoint_after", False) else "false")
+    return 0
+
+
 def cmd_render_template(args):
     manifest = load_manifest(args.file)
     values = parse_vars(args.var)
@@ -206,6 +226,16 @@ def build_parser():
     p.add_argument("--file", required=True)
     p.add_argument("--kind", required=True, choices=["order", "skill_order", "shell_order", "shell_excluded", "disabled"])
     p.set_defaults(func=cmd_execution_order)
+
+    p = sub.add_parser("execution-get")
+    p.add_argument("--file", required=True)
+    p.add_argument("--key", required=True)
+    p.set_defaults(func=cmd_execution_get)
+
+    p = sub.add_parser("breakpoint-after")
+    p.add_argument("--file", required=True)
+    p.add_argument("--phase", required=True)
+    p.set_defaults(func=cmd_breakpoint_after)
 
     p = sub.add_parser("render-template")
     p.add_argument("--file", required=True)

@@ -3,6 +3,7 @@ import argparse
 import copy
 import json
 import os
+import sys
 from datetime import datetime, timezone
 
 
@@ -24,6 +25,10 @@ def save_json(path, data):
 
 def phase_ids(manifest):
     return [phase["id"] for phase in manifest.get("phases", [])]
+
+
+def phase_map(manifest):
+    return {phase["id"]: phase for phase in manifest.get("phases", [])}
 
 
 def ordered_unique(values):
@@ -55,6 +60,23 @@ def build_order(manifest, args):
     return ordered_unique(order)
 
 
+def build_breakpoints(manifest, args):
+    phases = phase_map(manifest)
+    breakpoints = {
+        phase_id: bool(phase.get("breakpoint_after", False))
+        for phase_id, phase in phases.items()
+    }
+    for phase_id in args.break_phase or []:
+        if phase_id not in phases:
+            raise ValueError(f"unknown phase for --break: {phase_id}")
+        breakpoints[phase_id] = True
+    for phase_id in args.no_break_phase or []:
+        if phase_id not in phases:
+            raise ValueError(f"unknown phase for --no-break: {phase_id}")
+        breakpoints[phase_id] = False
+    return breakpoints
+
+
 def main():
     parser = argparse.ArgumentParser(description="Create a workspace-level j-workflow run file from a template manifest.")
     parser.add_argument("--template", required=True)
@@ -63,9 +85,14 @@ def main():
     parser.add_argument("--task-name", required=True)
     parser.add_argument("--provider", required=True)
     parser.add_argument("--model", required=True)
+    parser.add_argument("--max-rounds", type=int, default=3)
+    parser.add_argument("--break", dest="break_phase", action="append", default=[])
+    parser.add_argument("--no-break", dest="no_break_phase", action="append", default=[])
     parser.add_argument("--enable", action="append", default=[])
     parser.add_argument("--disable", action="append", default=[])
     args = parser.parse_args()
+    if args.max_rounds < 0:
+        raise ValueError("--max-rounds must be a non-negative integer")
 
     template_path = os.path.abspath(args.template)
     manifest = load_json(template_path)
@@ -80,6 +107,8 @@ def main():
     run["generated_at"] = now_iso()
     run.setdefault("execution", {})["order"] = order
     run["execution"]["mode"] = args.mode
+    run["execution"]["max_rounds"] = args.max_rounds
+    run["execution"]["breakpoints"] = build_breakpoints(run, args)
     run["execution"]["disabled"] = [phase_id for phase_id in phase_ids(run) if phase_id not in set(order)]
 
     save_json(args.output, run)
@@ -88,4 +117,8 @@ def main():
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except Exception as exc:
+        print(f"[ERROR] create-workflow-run: {exc}", file=sys.stderr)
+        raise SystemExit(1)
