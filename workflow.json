@@ -69,6 +69,7 @@
       "model_key": "model_review",
       "instance_name_template": "review-requirement",
       "prompt_file_template": "{phase_dir}/{phase_name}.prompt",
+      "prompt_template": "prompts/review-requirement.md",
       "output": "requirement-review/requirement-review.md",
       "verdicts": ["PASS", "NEEDS_CLARIFICATION"],
       "artifact_check": {
@@ -85,6 +86,7 @@
       "model_key": "model_explore",
       "instance_name_template": "explore",
       "prompt_file_template": "{phase_dir}/{phase_name}.prompt",
+      "prompt_template": "prompts/explore.md",
       "output": "explore/exploration.md",
       "confirm": "optional"
     },
@@ -97,6 +99,7 @@
       "model_key": "model_design",
       "instance_name_template": "design",
       "prompt_file_template": "{phase_dir}/{phase_name}.prompt",
+      "prompt_template": "prompts/design.md",
       "outputs": ["design/plan.md", "design/implementation-brief.md"],
       "artifact_check": {
         "required_keywords": ["方案概述", "复用分析", "数据模型", "接口设计", "核心流程", "性能评估", "可观测性方案", "实现指引", "风险和待确认项", "实施评估", "设计决策记录", "交付自检"]
@@ -112,6 +115,7 @@
       "model_key": "model_review",
       "instance_name_template": "review-plan-r{round}",
       "prompt_file_template": "{phase_dir}/{phase_name}.prompt",
+      "prompt_template": "prompts/review-plan.md",
       "output_pattern": "review/review-r{round}.md",
       "latest": "review/review.md",
       "verdicts": ["PASS", "NEEDS_REVISION"],
@@ -134,6 +138,7 @@
       "model_key": "model_revise",
       "instance_name_template": "revise-r{round}",
       "prompt_file_template": "{phase_dir}/{phase_name}.prompt",
+      "prompt_template": "prompts/revise.md",
       "resume_from": "design",
       "output_pattern": "review/revise-notes-r{round}.md",
       "updates": ["design/plan-r{round}.md", "design/plan.md", "design/implementation-brief.md"],
@@ -148,6 +153,7 @@
       "model_key": "model_implement",
       "instance_name_template": "implement",
       "prompt_file_template": "{phase_dir}/{phase_name}.prompt",
+      "prompt_template": "prompts/implement.md",
       "output": "implement/impl-notes.md",
       "artifact_check": {
         "required_keywords": ["实现概要", "方案符合度自检", "测试覆盖情况", "已知局限", "plan.md / implementation-brief.md 同步情况", "实现决策记录"]
@@ -163,6 +169,7 @@
       "model_key": "model_review_code",
       "instance_name_template": "review-code-r{round}",
       "prompt_file_template": "{phase_dir}/{phase_name}.prompt",
+      "prompt_template": "prompts/review-code.md",
       "output_pattern": "review-code/code-review-r{round}.md",
       "latest": "review-code/code-review.md",
       "verdicts": ["PASS", "NEEDS_FIX"],
@@ -185,6 +192,7 @@
       "model_key": "model_fix",
       "instance_name_template": "fix-r{round}",
       "prompt_file_template": "{phase_dir}/{phase_name}.prompt",
+      "prompt_template": "prompts/fix.md",
       "resume_from": "implement",
       "output_pattern": "review-code/fix-notes-r{round}.md",
       "artifact_check": {
@@ -201,6 +209,7 @@
       "model_key": "model_review",
       "instance_name_template": "verify-observability",
       "prompt_file_template": "{phase_dir}/{phase_name}.prompt",
+      "prompt_template": "prompts/verify-observability.md",
       "output": "verify-observability/observability-report.md",
       "verdicts": ["PASS", "NEEDS_FIX"],
       "artifact_check": {

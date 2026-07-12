@@ -13,9 +13,14 @@ def main():
     if not os.path.isfile(path):
         print(f"[ERROR] manifest not found: {path}", file=sys.stderr)
         return 1
-
     with open(path, "r", encoding="utf-8") as f:
         data = json.load(f)
+
+    manifest_dir = os.path.dirname(os.path.abspath(path))
+    template_base_dir = manifest_dir
+    source_manifest = data.get("source_manifest")
+    if data.get("kind") == "run" and isinstance(source_manifest, str):
+        template_base_dir = os.path.dirname(os.path.abspath(source_manifest))
 
     required_top = [
         "schema_version",
@@ -47,6 +52,7 @@ def main():
         raise ValueError("phases must be a non-empty list")
 
     phase_map = {}
+    has_prompt_templates = any("prompt_template" in phase for phase in data["phases"] if isinstance(phase, dict))
     for phase in data["phases"]:
         if not isinstance(phase, dict):
             raise ValueError("each phase must be a JSON object")
@@ -77,6 +83,14 @@ def main():
             raise ValueError(f"phase {phase['id']} skill must be null or string")
         if not any(key in phase for key in ("output", "outputs", "output_pattern")):
             raise ValueError(f"phase {phase['id']} must define output, outputs, or output_pattern")
+        if has_prompt_templates and "prompt_template" not in phase:
+            raise ValueError(f"phase {phase['id']} missing prompt_template")
+        if "prompt_template" in phase:
+            template_path = phase["prompt_template"]
+            if not isinstance(template_path, str):
+                raise ValueError(f"phase {phase['id']} prompt_template must be a string")
+            if not os.path.isfile(os.path.join(template_base_dir, template_path)):
+                raise ValueError(f"phase {phase['id']} prompt_template not found: {template_path}")
         if "artifact_check" in phase:
             check = phase["artifact_check"]
             if not isinstance(check, dict):

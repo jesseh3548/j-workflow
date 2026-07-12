@@ -12,6 +12,16 @@ else
     echo "Cannot find workflow helper scripts near $SCRIPT_DIR" >&2
     exit 1
 fi
+if [[ -d "$SCRIPT_DIR/prompts" ]]; then
+    # Source checkout layout: orchestrate.sh at repo root, templates in ./prompts.
+    PROMPTS_DIR="$SCRIPT_DIR/prompts"
+elif [[ -d "$SCRIPT_DIR/../prompts" ]]; then
+    # Installed layout: orchestrate.sh in bin/, templates copied as sibling ../prompts.
+    PROMPTS_DIR="$(cd "$SCRIPT_DIR/../prompts" && pwd)"
+else
+    echo "Cannot find prompt templates near $SCRIPT_DIR" >&2
+    exit 1
+fi
 
 # ============================================================
 # Multi-Agent Development Orchestrator
@@ -383,6 +393,69 @@ render_phase_template() {
         started_marker_template) echo "${phase_dir}/${phase_name}.started" ;;
         *) return 1 ;;
     esac
+}
+
+phase_dir_for() {
+    case "$1" in
+        explore) echo "$DIR_EXPLORE" ;;
+        design) echo "$DIR_DESIGN" ;;
+        review-plan|revise) echo "$DIR_REVIEW" ;;
+        implement) echo "$DIR_IMPLEMENT" ;;
+        review-code|fix) echo "$DIR_REVIEW_CODE" ;;
+        requirement-review) echo "$WORKSPACE_DIR/requirement-review" ;;
+        verify-observability) echo "$WORKSPACE_DIR/verify-observability" ;;
+        *) echo "$WORKSPACE_DIR/$1" ;;
+    esac
+}
+
+prompt_template_path_for() {
+    local phase_id="$1"
+    local prompt_template=""
+
+    if [[ -n "${FLOW_FILE:-}" && -f "${FLOW_FILE:-}" ]]; then
+        prompt_template="$("$BIN_DIR/workflow-manifest" phase-get --file "$FLOW_FILE" --phase "$phase_id" --field prompt_template 2>/dev/null || true)"
+    fi
+    prompt_template="${prompt_template:-prompts/${phase_id}.md}"
+
+    if [[ "$prompt_template" = /* ]]; then
+        echo "$prompt_template"
+    elif [[ "$prompt_template" == prompts/* ]]; then
+        echo "$PROMPTS_DIR/${prompt_template#prompts/}"
+    else
+        echo "$PROMPTS_DIR/$prompt_template"
+    fi
+}
+
+# render_phase_prompt <phase_id> <footer> <output_file> <context> [round] [phase_name]
+# prompt_template 来自 workflow manifest；phase_name 默认等于 phase_id，
+# 循环阶段（review-plan-rN 等）传入实际 phase_name 用于 footer 里的 phase-finish 命令。
+render_phase_prompt() {
+    local phase_id="$1"
+    local footer="$2"
+    local output_file="$3"
+    local context="$4"
+    local round="${5:-}"
+    local phase_name="${6:-$phase_id}"
+
+    "$BIN_DIR/render-prompt" \
+        --template "$(prompt_template_path_for "$phase_id")" \
+        --footer "$footer" \
+        --var "project_dir=$PROJECT_DIR" \
+        --var "workspace_dir=$WORKSPACE_DIR" \
+        --var "task_name=$TASK_NAME" \
+        --var "phase_dir=$(phase_dir_for "$phase_id")" \
+        --var "phase_id=$phase_id" \
+        --var "requirement_file=$WORKSPACE_DIR/requirement.md" \
+        --var "plan_file=$DIR_DESIGN/plan.md" \
+        --var "brief_file=$DIR_DESIGN/implementation-brief.md" \
+        --var "review_latest=$DIR_REVIEW/review.md" \
+        --var "code_review_latest=$DIR_REVIEW_CODE/code-review.md" \
+        --var "output_file=$output_file" \
+        --var "context=$context" \
+        --var "round=$round" \
+        --var "bin_dir=$BIN_DIR" \
+        --var "state_file=$STATE_FILE" \
+        --var "phase_name=$phase_name"
 }
 
 phase_artifact_path() {
@@ -867,21 +940,11 @@ run_phase() {
     local phase_model
     phase_model="$(get_phase_model "$skill_name")"
 
-    # 将 prompt 写入临时文件，避免命令行长度限制和转义问题
+    # prompt 已由调用方通过 render_phase_prompt（bin/render-prompt --footer interactive）渲染好，
+    # 完成状态指令包含在 _footer-interactive.md 里，这里只需落盘。
     local prompt_file
     prompt_file="$(render_phase_template "$skill_name" "prompt_file_template" "$phase_name" "$log_dir")"
     echo "$prompt" > "$prompt_file"
-
-    # 在 prompt 末尾追加完成状态指令。
-    # agent 完成任务后询问用户确认，用户确认后写 workflow-state.json，编排器检测到后推进下一阶段。
-    cat >> "$prompt_file" << DONEEOF
-
-重要：当你完成上述所有任务后，请告知用户你已完成，并列出你的产出文件路径，请用户审阅。
-如果你和用户交流后，最终结论、边界、取舍或修正有任何变化，必须先把这些变化回写到上述产出文件对应章节，再结束对话。
-当用户确认可以继续后（例如回复"ok"、"继续"、"下一步"等），运行以下 bash 命令写入阶段完成状态：
-"$BIN_DIR/workflow-state" phase-finish --file "$STATE_FILE" --phase "$phase_name" --status done --exit-code 0 --output-file "$output_file"
-这个状态用于通知编排器推进到下一阶段。在用户明确确认之前，不要写入完成状态。
-DONEEOF
 
     # 构建在新 tab 中执行的脚本
     local started_marker
@@ -1026,16 +1089,9 @@ run_analysis_phase() {
     log_info "Provider: $PROVIDER"
     log_info "输出文件: $output_file"
 
-    cat > "$prompt_file" << PROMPTEOF
-$prompt
-
-重要：这是非交互 analysis phase。
-- 必须直接完成任务并写入指定输出文件：$output_file
-- 不要等待用户确认
-- 不要写 marker 文件或交互完成状态；非交互 runner 会在进程退出后更新 workflow-state.json
-- 不要修改业务代码；除指定报告/验证产物外不要写其他文件
-- 完成后直接退出
-PROMPTEOF
+    # prompt 已由调用方通过 render_phase_prompt（bin/render-prompt --footer noninteractive）渲染好，
+    # 非交互约束包含在 _footer-noninteractive.md 里，这里只需落盘。
+    printf '%s' "$prompt" > "$prompt_file"
 
     state_cmd phase-start \
         --file "$STATE_FILE" \
@@ -1136,15 +1192,8 @@ if [[ "$PHASE_EXPLORE" == true ]] && ! should_skip_phase "explore" "$EXPLORE_OUT
         EXPLORE_INPUT="参考需求文档 $WORKSPACE_DIR/requirement.md"
     fi
 
-    run_phase "explore" "explore" \
-        "调用 /explore skill。
-
-上下文参数：
-- 探索输入：${EXPLORE_INPUT}
-- 项目路径：$PROJECT_DIR
-- 报告输出路径：$EXPLORE_OUTPUT
-- 如果探索过程中发现需求可以被细化，也将细化后的需求描述写入 $WORKSPACE_DIR/requirement.md" \
-        "$EXPLORE_OUTPUT" "$DIR_EXPLORE"
+    EXPLORE_PROMPT="$(render_phase_prompt "explore" "interactive" "$EXPLORE_OUTPUT" "$EXPLORE_INPUT")"
+    run_phase "explore" "explore" "$EXPLORE_PROMPT" "$EXPLORE_OUTPUT" "$DIR_EXPLORE"
 
     if [[ "$BP_AFTER_EXPLORE" == true ]]; then
         wait_for_user "探索阶段完成，请审阅探索报告" "$EXPLORE_OUTPUT"
@@ -1162,24 +1211,8 @@ if [[ "$PHASE_DESIGN" == true ]] && ! should_skip_phase "design" "$DESIGN_OUTPUT
         DESIGN_CONTEXT="探索报告在 $DIR_EXPLORE/exploration.md，请先阅读。"
     fi
 
-    run_phase "design" "design" \
-        "调用 /design skill。
-
-上下文参数：
-- 需求路径：$WORKSPACE_DIR/requirement.md
-- 项目路径：$PROJECT_DIR
-- 方案输出路径：$DESIGN_OUTPUT
-- 实现核对索引输出路径：$DIR_DESIGN/implementation-brief.md
-- 补充上下文：${DESIGN_CONTEXT}
-
-额外约束：
-- plan.md 是唯一权威设计与实现依据，必须完整到让新的 implement agent 不依赖历史对话即可实现
-- 所有用户交互确认过的选择、边界、暂缓项、忽略项都必须写入 plan.md 对应章节
-- 对每个改动项，必须明确区分「行为变更」和「结构优化」
-- 对生产在跑的关键路径，默认保留现有行为，除非有明确且充分的理由变更
-- 如果涉及序列化库切换、数据格式变更、协议变更等行为变更，必须逐字段验证兼容性，并在风险章节显式标注
-- 除 plan.md 外，必须生成 implementation-brief.md，作为从 plan.md 派生的实现核对索引。brief 控制在约 150-250 行，必须包含 Objective、Non-goals、Required Changes（ID/Plan Section/Repo/File/Symbol/Change/Why/Verification）、Contract Changes、Cross-repo Sync Points、Edge Cases、Tests Required、Review Checklist；brief 不得包含 plan 外设计" \
-        "$DESIGN_OUTPUT" "$DIR_DESIGN"
+    DESIGN_PROMPT="$(render_phase_prompt "design" "interactive" "$DESIGN_OUTPUT" "$DESIGN_CONTEXT")"
+    run_phase "design" "design" "$DESIGN_PROMPT" "$DESIGN_OUTPUT" "$DIR_DESIGN"
 
     if [[ "$BP_AFTER_DESIGN" == true ]]; then
         wait_for_user "方案设计完成，请审阅技术方案" "$DESIGN_OUTPUT" "跳过方案评审，直接进入实现"
@@ -1254,27 +1287,8 @@ if [[ "$PHASE_REVIEW_PLAN" == true && "$REVIEW_ALREADY_PASSED" == false ]]; then
                 REVIEW_CONTEXT="这是第${REVIEW_ROUND}轮评审。上一轮评审报告在 $PREV_REVIEW_OUTPUT，方案修正说明在 $PREV_REVISE_OUTPUT。请重点验证上轮提出的问题是否已修正到位，同时检查修正是否引入新问题。"
             fi
 
-            run_analysis_phase "review-plan-r${REVIEW_ROUND}" "review-plan" \
-            "调用 /review-plan skill。
-
-上下文参数：
-- 方案路径：$DIR_DESIGN/plan.md
-- 实现核对索引路径：$DIR_DESIGN/implementation-brief.md
-- 项目路径：$PROJECT_DIR
-- 报告输出路径：$REVIEW_OUTPUT
-- 评审上下文：${REVIEW_CONTEXT}
-
-额外关注：
-- plan.md 是唯一权威设计与实现依据，implementation-brief.md 只是从 plan 派生的核对索引
-- 必须检查 plan 是否足够让新 implement agent 独立实现，并检查 brief 是否完整覆盖 plan 且没有 plan 外内容
-- 必须提取并验证方案隐含假设：对 plan 中关于现有代码行为、复用点、异常传播、配置/枚举/状态存在性的描述逐条读源码验证
-- 方案中标注为「行为变更」的改动，必须逐字段验证兼容性
-- 如果方案没有区分行为变更和结构优化，这本身就是一个问题
-
-最后必须给出一行总体裁决（这一行会被自动解析，格式必须严格）：
-- 如果所有项都通过：VERDICT: PASS
-- 如果有任何项需要修改：VERDICT: NEEDS_REVISION" \
-                "$REVIEW_OUTPUT" "$DIR_REVIEW"
+            REVIEW_PROMPT="$(render_phase_prompt "review-plan" "noninteractive" "$REVIEW_OUTPUT" "$REVIEW_CONTEXT" "$REVIEW_ROUND" "review-plan-r${REVIEW_ROUND}")"
+            run_analysis_phase "review-plan-r${REVIEW_ROUND}" "review-plan" "$REVIEW_PROMPT" "$REVIEW_OUTPUT" "$DIR_REVIEW"
 
             # 保持 review.md 始终指向最新版
             cp "$REVIEW_OUTPUT" "$REVIEW_LATEST" 2>/dev/null || true
@@ -1316,34 +1330,8 @@ if [[ "$PHASE_REVIEW_PLAN" == true && "$REVIEW_ALREADY_PASSED" == false ]]; then
         fi
 
         # revise 续接 design session（同一个 agent 修正自己的方案）
-        run_phase "revise-r${REVIEW_ROUND}" "revise" \
-            "评审报告已出，请根据评审反馈修正你的技术方案。
-
-阅读评审报告：$REVIEW_LATEST
-${REVISE_CONTEXT}
-
-在 $PROJECT_DIR 项目中验证评审意见是否正确（自己读代码确认）。
-
-修正规则：
-- 评审意见正确的：修正方案
-- 评审意见有误的：保留原方案，说明理由
-- 评审建议合理但不在本次范围的：记录到风险章节
-
-修正方式：
-- 先执行 cp $DIR_DESIGN/plan.md $PLAN_ROUND_OUTPUT，在 $PLAN_ROUND_OUTPUT 上修改
-- 就地修改对应章节，禁止在文件末尾追加修正说明章节。$PLAN_ROUND_OUTPUT 必须是一份完整、自洽的方案文档
-- 修改任何一处后，检查全文是否有其他章节涉及同一话题（如改了数据模型，流程、性能评估、实现指引中的引用也要同步更新）
-- 用 Edit 工具精确修改具体章节，不要 Write 重写整个文件
-- 所有修改完成后，Read 整个 $PLAN_ROUND_OUTPUT 通读一遍，确认没有前后矛盾或残留旧内容
-- 同步更新 $DIR_DESIGN/implementation-brief.md，确保 Required Changes、Contract Changes、Cross-repo Sync Points、Tests Required 与最新 $PLAN_ROUND_OUTPUT 一致
-
-将修正说明写入 $REVISE_OUTPUT，包含：
-- 采纳的评审意见及修正内容（标注修改了哪些章节）
-- 未采纳的评审意见及理由
-- 新增的风险项
-- implementation-brief.md 的同步更新内容" \
-            "$REVISE_OUTPUT" "$DIR_REVIEW" \
-            "design"
+        REVISE_PROMPT="$(render_phase_prompt "revise" "interactive" "$REVISE_OUTPUT" "$REVISE_CONTEXT" "$REVIEW_ROUND" "revise-r${REVIEW_ROUND}")"
+        run_phase "revise-r${REVIEW_ROUND}" "revise" "$REVISE_PROMPT" "$REVISE_OUTPUT" "$DIR_REVIEW" "design"
         state_cmd set-phase-field --file "$STATE_FILE" --phase "revise-r${REVIEW_ROUND}" --key round --value "$REVIEW_ROUND"
         state_cmd set-phase-field --file "$STATE_FILE" --phase "revise-r${REVIEW_ROUND}" --key loop --value "design-review"
         state_cmd set-phase-field --file "$STATE_FILE" --phase "revise-r${REVIEW_ROUND}" --key resume_from --value "design"
@@ -1369,24 +1357,8 @@ if [[ "$PHASE_IMPLEMENT" == true ]] && ! should_skip_phase "implement" "$IMPLEME
         IMPL_CONTEXT="${IMPL_CONTEXT}方案修正说明在 $REVISE_OUTPUT，注意哪些评审意见已被采纳。"
     fi
 
-    run_phase "implement" "implement" \
-        "调用 /implement skill。
-
-上下文参数：
-- 方案路径：$DIR_DESIGN/plan.md
-- 实现核对索引路径：$DIR_DESIGN/implementation-brief.md
-- 项目路径：$PROJECT_DIR
-- 输出路径：$IMPLEMENT_OUTPUT
-- 实现上下文：${IMPL_CONTEXT}
-
-执行规则：
-- 先读完整 plan.md，再读 implementation-brief.md
-- plan.md 是唯一权威设计与实现依据；implementation-brief.md 只作为从 plan 派生的核对索引
-- 如 brief 与 plan 冲突，或 brief 提到 plan 中不存在的要求，不要按 brief 自行改代码；在 impl-notes.md 标记 BLOCKED: brief/plan mismatch，并暂停让编排器回到 design/revise 修设计产物
-- 按 plan 追溯并实现 brief 的 Required Changes，每条在 impl-notes.md 标记 DONE / SKIPPED / BLOCKED
-- 不依赖历史对话；所有必须上下文来自文件
-- 读代码时先定位 diff hunk/符号，再读小窗口，避免全量读取大文件" \
-        "$IMPLEMENT_OUTPUT" "$DIR_IMPLEMENT"
+    IMPLEMENT_PROMPT="$(render_phase_prompt "implement" "interactive" "$IMPLEMENT_OUTPUT" "$IMPL_CONTEXT")"
+    run_phase "implement" "implement" "$IMPLEMENT_PROMPT" "$IMPLEMENT_OUTPUT" "$DIR_IMPLEMENT"
 
     if [[ "$BP_AFTER_IMPLEMENT" == true ]]; then
         wait_for_user "实现完成，请审阅实现说明" "$IMPLEMENT_OUTPUT" "跳过代码评审，直接结束"
@@ -1460,21 +1432,8 @@ if [[ "$PHASE_REVIEW_CODE" == true && "$CODE_REVIEW_ALREADY_PASSED" == false ]];
                 CODE_REVIEW_CONTEXT="这是第${CODE_REVIEW_ROUND}轮代码评审。上一轮评审报告在 $PREV_CODE_REVIEW_OUTPUT，修复说明在 $PREV_FIX_OUTPUT。请重点验证上轮提出的必须修改项是否已修复到位，同时检查修复是否引入新问题。"
             fi
 
-            run_analysis_phase "review-code-r${CODE_REVIEW_ROUND}" "review-code" \
-            "调用 /review-code skill（对照方案模式）。
-
-上下文参数：
-- 方案路径：$DIR_DESIGN/plan.md
-- 实现核对索引路径：$DIR_DESIGN/implementation-brief.md
-- 项目路径：$PROJECT_DIR
-- 报告输出路径：$CODE_REVIEW_OUTPUT
-- 审查要求：以 plan.md 为唯一权威依据，implementation-brief.md 只作为核对索引。先读完整 plan.md，再读 implementation-brief.md；不要只看 diff；必须从变更点扩展到调用方、被调方、测试、配置、数据模型、相似实现，并在报告中写明审查覆盖与缺口。必须检查 brief 是否完整覆盖 plan 且没有 plan 外内容。
-- 评审上下文：${CODE_REVIEW_CONTEXT}
-
-最后必须给出一行总体裁决（这一行会被自动解析，格式必须严格）：
-- 如果所有必须修改的问题都已解决或无必须修改项：VERDICT: PASS
-- 如果有必须修改的问题：VERDICT: NEEDS_FIX" \
-                "$CODE_REVIEW_OUTPUT" "$DIR_REVIEW_CODE"
+            CODE_REVIEW_PROMPT="$(render_phase_prompt "review-code" "noninteractive" "$CODE_REVIEW_OUTPUT" "$CODE_REVIEW_CONTEXT" "$CODE_REVIEW_ROUND" "review-code-r${CODE_REVIEW_ROUND}")"
+            run_analysis_phase "review-code-r${CODE_REVIEW_ROUND}" "review-code" "$CODE_REVIEW_PROMPT" "$CODE_REVIEW_OUTPUT" "$DIR_REVIEW_CODE"
 
             # 保持 code-review.md 始终指向最新版
             cp "$CODE_REVIEW_OUTPUT" "$CODE_REVIEW_LATEST" 2>/dev/null || true
@@ -1516,34 +1475,8 @@ if [[ "$PHASE_REVIEW_CODE" == true && "$CODE_REVIEW_ALREADY_PASSED" == false ]];
         fi
 
         # fix 续接 implement session（同一个 agent 修复自己的代码）
-        run_phase "fix-r${CODE_REVIEW_ROUND}" "fix" \
-            "代码评审报告已出，请根据评审反馈修复代码问题。
-
-阅读评审报告：$CODE_REVIEW_LATEST
-实现核对索引：$DIR_DESIGN/implementation-brief.md
-${FIX_CONTEXT}
-
-在 $PROJECT_DIR 项目中修复评审指出的问题。
-
-修复规则：
-- 「必须修改」的问题：必须修复
-- 评审意见有误的：保留原实现，说明理由
-- 「建议改进」的问题：酌情采纳，不强制
-- 修复或用户确认过程中产生的任何新事实，最终都必须同步回 $DIR_DESIGN/plan.md 对应章节；包括实现细节、异常处理、兼容策略、测试边界、可观测性口径、人工 CR 结论
-- 如果新事实影响 Required Changes、Contract Changes、Cross-repo Sync Points、Edge Cases、Tests Required 或 Review Checklist，同步更新 $DIR_DESIGN/implementation-brief.md，确保 brief 仍完全由 plan 派生
-- 如果当前 fix session 无法安全更新 plan.md，应暂停并让编排器回到 design/revise；不能只把最终事实写在 fix-notes
-- 如果 brief 与 plan 冲突，以 plan.md 为准；不要按 brief 发明新设计。冲突影响修复判断时，暂停让编排器回到 design/revise 修正设计产物
-
-修复后运行与本次变更相关的测试确保通过；如果项目没有测试、测试工具不可用，或本次变更不适合自动化测试，请在修复说明中写明原因和替代验证方式。
-
-将修复说明写入 $FIX_OUTPUT，包含：
-- 已修复的问题及修复内容
-- 未修复的问题及理由
-- plan.md 是否同步更新；如未更新，说明为什么这些变更不影响最终方案事实
-- implementation-brief.md 是否同步更新；如未更新，说明原因
-- 测试运行结果" \
-            "$FIX_OUTPUT" "$DIR_REVIEW_CODE" \
-            "implement"
+        FIX_PROMPT="$(render_phase_prompt "fix" "interactive" "$FIX_OUTPUT" "$FIX_CONTEXT" "$CODE_REVIEW_ROUND" "fix-r${CODE_REVIEW_ROUND}")"
+        run_phase "fix-r${CODE_REVIEW_ROUND}" "fix" "$FIX_PROMPT" "$FIX_OUTPUT" "$DIR_REVIEW_CODE" "implement"
         state_cmd set-phase-field --file "$STATE_FILE" --phase "fix-r${CODE_REVIEW_ROUND}" --key round --value "$CODE_REVIEW_ROUND"
         state_cmd set-phase-field --file "$STATE_FILE" --phase "fix-r${CODE_REVIEW_ROUND}" --key loop --value "code-review-fix"
         state_cmd set-phase-field --file "$STATE_FILE" --phase "fix-r${CODE_REVIEW_ROUND}" --key resume_from --value "implement"

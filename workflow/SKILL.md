@@ -264,7 +264,7 @@ bin/validate-workspace-artifacts --manifest <workflow.json> --workspace <workspa
 
 将阶段 prompt 写入 `<workspace>/<phase>/<phase>.prompt`。
 
-**Skill 调用约定**：大部分阶段的 prompt 以"调用 /xxx skill"开头。Agent 收到此 prompt 后，应使用 Skill tool 调用对应 skill，然后按 skill 指引执行。Prompt 中的「上下文参数」覆盖 skill 中的默认路径（如 skill 默认写 workspace/plan.md，但上下文参数指定了 {dir_design}/plan.md，则以后者为准）。
+**Skill 调用约定**：大部分阶段的 prompt 以"调用 /xxx skill"开头。Agent 收到此 prompt 后，应使用 Skill tool 调用对应 skill，然后按 skill 指引执行。Prompt 中的「上下文参数」覆盖 skill 中的默认路径（如 skill 默认写 workspace/plan.md，但上下文参数指定了 `design/plan.md` 的绝对路径，则以后者为准）。
 
 ### Step 1A: Subagent phase 执行契约
 
@@ -384,304 +384,37 @@ Subagent phase 在子 agent 返回并通过产物检查后进入阶段间确认�
 
 这是轻量校验，不替代 review-plan/review-code 的深度评审；它只防止空文件、漏章节、漏 VERDICT 之类的产物质量问题进入下一阶段。
 
-## 各阶段 Prompt
+## Prompt 模板与上下文
 
-### Phase 0.5: Review Requirement（默认开启，可跳过）
+阶段 prompt 一律从仓库根目录的 `prompts/` 渲染，不在本 skill 中复写正文。渲染命令：
 
-执行模式：Subagent phase。
-
-```
-调用 /review-requirement skill。
-
-上下文参数：
-- 需求文档：{workspace}/requirement.md
-- 项目路径：{project_dir}（如有）
-- 报告输出路径：{dir_requirement_review}/requirement-review.md
+```bash
+bin/render-prompt --template "prompts/<phase>.md" --footer "<interactive|subagent|noninteractive|none>" --var key=value ...
 ```
 
-{requirement_review_context}：如果有项目路径，在 prompt 中加上 "项目代码在 {project_dir}，可以快速扫描验证需求的技术前提是否成立。"
-
-**编排器在 review-requirement 完成后**：
-1. 读取 requirement-review.md，检查 VERDICT
-2. 如果 `VERDICT: PASS` → 告知用户审视通过，简要列出关键发现（如有扩展性建议），继续下一阶段
-3. 如果 `VERDICT: NEEDS_CLARIFICATION` → 从报告的"必须澄清的问题"章节提取每一条，以**编号列表**形式展示给用户，格式如下：
-
-```
-需求审视发现以下问题需要你确认：
-
-1. [问题内容]（来源：[维度名]）
-2. [问题内容]（来源：[维度名]）
-3. ...
-
-请逐条回复你的决定（澄清/调整/忽略）。我会据此更新 requirement.md，然后继续进入设计阶段。
-如果你想重新跑一次需求审视，也可以告诉我。
-```
-
-4. 收到用户回复后：
-   - 将用户的澄清/调整写入 requirement.md（追加「需求澄清」章节，保留原文不删改）
-   - 将用户标记为"忽略"的项记录到 requirement-review.md 末尾（标注"用户已确认忽略"）
-   - 继续进入下一阶段（不重跑审视，除非用户明确要求）
-
-**传递给后续阶段**：如果需求审视发现了值得注意的点（短视设计、扩展性建议等），在 design agent 的 prompt 中加上 "需求审视报告在 {dir_requirement_review}/requirement-review.md，请先阅读，其中的扩展性建议和边界澄清应纳入方案设计考虑。"
-
-### Phase 1: Explore（可选）
-
-执行模式：Interactive phase。当前不做子 agent 化。
-
-```
-调用 /explore skill。
-
-上下文参数：
-- 探索方向：{explore_input}
-- 项目路径：{project_dir}
-- 报告输出路径：{dir_explore}/exploration.md
-如果探索过程中发现需求可以被细化，也将细化后的需求描述写入 {workspace}/requirement.md
-```
-
-### Phase 2: Design
-
-执行模式：Interactive phase。
-
-```
-调用 /design skill。
-
-上下文参数：
-- 需求文档：{workspace}/requirement.md
-- 项目路径：{project_dir}
-- 方案输出路径：{dir_design}/plan.md
-- 实现核对索引输出路径：{dir_design}/implementation-brief.md
-- 交付要求：plan.md 是唯一权威设计与实现依据，必须完整到让新的 implement agent 不依赖历史对话即可实现。所有用户交互确认过的选择、边界、暂缓项、忽略项都必须写入 plan.md 对应章节；implementation-brief.md 只能从 plan.md 派生，不得包含 plan 外设计。
-{design_context}
-```
-
-design_context：
-- 如果有 exploration.md，加上 "探索报告在 {dir_explore}/exploration.md，请先阅读。"
-- 如果有 requirement-review.md，加上 "需求审视报告在 {dir_requirement_review}/requirement-review.md，请先阅读，其中的扩展性建议和边界澄清应纳入方案设计考虑。"
-
-### Phase 3: Review
-
-执行模式：Subagent phase。
-
-```
-调用 /review-plan skill。
-
-上下文参数：
-- 方案路径：{dir_design}/plan.md
-- 实现核对索引路径：{dir_design}/implementation-brief.md
-- 项目路径：{project_dir}
-- 报告输出路径：{dir_review}/review-rN.md（N 为当前轮次，如 review-r1.md）
-- 评审要求：plan.md 是唯一权威设计与实现依据，implementation-brief.md 只是从 plan 派生的核对索引。必须检查 plan 是否足够让新 implement agent 独立实现，并检查 brief 是否完整覆盖 plan 且没有 plan 外内容。
-{review_context}
-```
-
-review_context：第 2 轮起加 "这是第N轮评审。上一轮评审报告在 {dir_review}/review-r{N-1}.md，方案修正说明在 {dir_review}/revise-notes-r{N-1}.md。请重点验证上轮提出的问题是否已修正到位，同时检查修正是否引入新问题。"
-
-**编排器在 review 完成后**：`cp review-rN.md review.md`（保持 review.md 始终指向最新版）
-
-### Phase 3.5: Revise
-
-执行模式：Interactive phase。
-
-revise 从 `workflow-state.json` 读取 design 阶段的 `session_id`，按 provider 精确续接 design session。
-
-```
-评审报告已出，请根据评审反馈修正你的技术方案。
-
-阅读评审报告：{dir_review}/review.md
-{revise_context}
-
-在 {project_dir} 项目中验证评审意见是否正确（自己读代码确认）。
-
-决策确认规则：遇到以下情况必须暂停问用户：
-- 评审意见和你的判断有分歧，需要用户裁定
-- 修正方向有多种选择（如评审说"需要缓存"但你认为可以不加，或加不同类型的缓存）
-- 修正会显著扩大方案范围
-格式：🔀 [类型]: [问题] → 选项 A/B → 建议
-
-修正规则：
-- 评审意见正确的：修正方案
-- 评审意见有误的：保留原方案，说明理由
-- 评审建议合理但不在本次范围的：记录到风险章节
-
-修正方式（三步走，禁止跳步）：
-
-**第一步：影响分析（先想清楚再动手）**
-- 先 `cp {dir_design}/plan.md {dir_design}/plan-rN.md`（N 为当前轮次，如 plan-r1.md）
-- Read 完整的 plan-rN.md，理解全文结构
-- 对每条评审意见，列出它影响的**所有章节**（不只是直接对应的章节）。例如：改数据模型字段 → 影响数据模型、接口设计、核心流程、性能评估、可观测性、实现指引共 6 处
-- 将影响分析写入 revise-notes 的开头
-
-**第二步：批量修改（按章节顺序，一次改到位）**
-- 按方案的章节顺序从头到尾修改，不要在章节间跳来跳去
-- 就地修改对应章节内容，禁止在文件末尾追加"修正说明"或"补充"章节
-- plan-rN.md 必须是一份完整、自洽的方案文档，读起来像是一次性写出来的，而不是被打了补丁的
-- 用 Edit 工具精确修改，不要 Write 重写整个文件
-
-**第三步：全文一致性验证（强制执行）**
-- Read 整个 plan-rN.md 通读一遍
-- 逐项检查：数据模型中的字段名/类型是否与接口设计一致？流程步骤中引用的表名/方法名是否与定义一致？性能评估的数值假设是否与前文匹配？实现指引的路径/类名是否与正文对应？
-- 如发现不一致，立即修正后再次通读确认
-- 同步更新 {dir_design}/implementation-brief.md，确保 Required Changes、Contract Changes、Cross-repo Sync Points、Tests Required 与最新 plan-rN.md 一致
-- 在 revise-notes 末尾记录一致性验证结论
-
-将修正说明写入 {dir_review}/revise-notes-rN.md（N 为当前轮次，如 revise-notes-r1.md），包含：
-- 采纳的评审意见及修正内容（标注修改了哪些章节）
-- 未采纳的评审意见及理由
-- 新增的风险项
-- implementation-brief.md 的同步更新内容
-- 与用户讨论中达成的决策（决策点 + 结论 + 理由）— 下游 agent 只读文件，读不到对话
-```
-
-**编排器在 revise 完成后**：`cp plan-rN.md plan.md`（保持 plan.md 始终指向最新版）
-
-run script 按 provider 使用精确续接：Claude Code 使用 `--resume <session_id>`，Codex 使用 `codex resume <session_id>`。
-
-续接来源：编排器从 `workflow-state.json` 读取目标 phase 的 `session_id`。`revise` 续接 `design`，`fix` 续接 `implement`。如果 `session_id` 缺失，Claude Code 可以回退到 session name，但可能出现同名 session 选择器；Codex 没有可靠 session name fallback，必须有 `session_id`。
-
-### Phase 4: Implement
-
-执行模式：Interactive phase。
-
-```
-调用 /implement skill。
-
-上下文参数：
-- 方案路径：{dir_design}/plan.md
-- 实现核对索引路径：{dir_design}/implementation-brief.md
-- 项目路径：{project_dir}
-- 输出路径：{dir_implement}/impl-notes.md
-{impl_context}
-```
-
-impl_context 构造规则：
-
-`plan.md` 是唯一权威设计与实现依据。`implementation-brief.md` 是从 `plan.md` 派生出来的实现核对索引，用来防漏、定位和验收，不得引入 `plan.md` 没有的设计决策。历史评审和修正记录不传给 implement agent——如果 `plan.md` 无法让新 agent 独立实现，说明 design 交付不完整，应回到 design/revise 修 `plan.md`，而不是让 implement 靠对话历史或 brief 补洞。
-
-`implementation-brief.md` 必须是短而精确的 checklist / trace index，控制在约 150-250 行。每个实现项都应能回链到 `plan.md` 的具体章节，包含：
-
-```markdown
-# Implementation Brief
-
-## 1. Objective
-## 2. Non-goals
-## 3. Required Changes
-| ID | Repo | File | Symbol | Change | Why | Verification |
-## 4. Contract Changes
-### API / Proto
-### DB / Entity / Mapper
-### Enum / Status
-### Config / Job / MQ / Metrics
-## 5. Cross-repo Sync Points
-| Contract | Producer | Consumer | Must Match |
-## 6. Edge Cases
-## 7. Tests Required
-| Test | Repo | Scenario | Expected |
-## 8. Review Checklist
-```
-
-Implement agent 使用规则：
-- 先读完整 `plan.md`，再读 `implementation-brief.md`。
-- 以 `plan.md` 为唯一权威依据；brief 只用于核对实现项、contract、边界和测试是否遗漏。
-- 如果 brief 与 plan 冲突，或 brief 提到 plan 中不存在的要求，不要按 brief 自行改代码；在 `impl-notes.md` 标记 `BLOCKED: brief/plan mismatch`，说明冲突，并暂停让编排器回到 design/revise 修正设计产物。
-- 按 `Required Changes` 逐条从 `plan.md` 追溯并实现；每条在 `impl-notes.md` 标记 `DONE` / `SKIPPED` / `BLOCKED`。
-- 如果实现过程中发现 `plan.md` 必须修改或补充，不要在 implement 阶段发明新设计；记录缺口并让编排器回到 design/revise。
-- 不依赖历史对话；所有必须上下文来自文件。
-- 读代码时遵守 hunk/window-first：先定位变更点和符号，再读小窗口，避免全量读取大文件。
-
-编排器按以下规则拼接上下文：
-
-1. **评审最终结论**（如有）：如果存在 `{dir_review}/review.md`（latest 指针），加上 "评审报告在 {dir_review}/review.md，可快速浏览了解评审关注的风险点，但实现以 plan.md 为准。"
-2. **需求审视**（如有）：如果存在 `{dir_requirement_review}/requirement-review.md`，加上 "需求审视报告在 {dir_requirement_review}/requirement-review.md，其中的边界澄清和扩展性建议与实现相关。"
-
-### Phase 5: Review Code
-
-执行模式：Subagent phase。
-
-```
-调用 /review-code skill（对照方案模式）。
-
-上下文参数：
-- 方案路径：{dir_design}/plan.md
-- 实现核对索引路径：{dir_design}/implementation-brief.md
-- 项目路径：{project_dir}
-- 报告输出路径：{dir_review_code}/code-review-rN.md（N 为当前轮次，如 code-review-r1.md）
-- 审查要求：以 plan.md 为唯一权威依据；implementation-brief.md 只作为核对索引。不要只看 diff；必须从变更点扩展到调用方、被调方、测试、配置、数据模型、相似实现，并在报告中写明审查覆盖与缺口。必须检查 brief 是否完整覆盖 plan 中所有实现项，且没有新增 plan 外要求。
-{review_code_context}
-```
-
-review_code_context：第 2 轮起加 "这是第N轮代码评审。上一轮评审报告在 {dir_review_code}/code-review-r{N-1}.md，修复说明在 {dir_review_code}/fix-notes-r{N-1}.md。请重点验证上轮提出的必须修改项是否已修复到位，同时检查修复是否引入新问题。"
-
-**编排器在 review-code 完成后**：`cp code-review-rN.md code-review.md`（保持 code-review.md 始终指向最新版）
-
-### Phase 5.5: Fix
-
-执行模式：Interactive phase。
-
-fix 从 `workflow-state.json` 读取 implement 阶段的 `session_id`，按 provider 精确续接 implement session。
-
-```
-代码评审报告已出，请根据评审反馈修复代码问题。
-
-阅读评审报告：{dir_review_code}/code-review.md
-实现核对索引：{dir_design}/implementation-brief.md
-{fix_context}
-
-在 {project_dir} 项目中修复评审指出的问题。
-
-决策确认规则：遇到以下情况必须暂停问用户：
-- 评审意见你认为有误，但不确定是否应该保留原实现
-- 修复方式有多种选择，各有利弊
-- 修复可能引入新的兼容性问题
-- 人工 CR 或用户反馈改变了方案细节、边界、取舍或验证口径
-格式：🔀 [类型]: [问题] → 选项 A/B → 建议
-
-修复规则：
-- 「必须修改」的问题：必须修复
-- 评审意见有误的：保留原实现，说明理由
-- 「建议改进」的问题：酌情采纳，不强制
-- 修复或用户确认过程中产生的任何新事实，最终都必须同步回 {dir_design}/plan.md 对应章节；包括实现细节、异常处理、兼容策略、测试边界、可观测性口径、人工 CR 结论。
-- 如果新事实影响 Required Changes、Contract Changes、Cross-repo Sync Points、Edge Cases、Tests Required 或 Review Checklist，同步更新 {dir_design}/implementation-brief.md，确保 brief 仍完全由 plan 派生。
-- 如果当前 fix session 无法安全更新 plan.md，应暂停并让编排器回到 design/revise；不能只把最终事实写在 fix-notes。
-- 如果 brief 与 plan 冲突，以 plan.md 为准；不要按 brief 发明新设计。冲突影响修复判断时，暂停让编排器回到 design/revise 修正设计产物。
-
-修复后运行与本次变更相关的测试确保通过；如果项目没有测试、测试工具不可用，或本次变更不适合自动化测试，请在修复说明中写明原因和替代验证方式。
-
-将修复说明写入 {dir_review_code}/fix-notes-rN.md（N 为当前轮次，如 fix-notes-r1.md），包含：
-- 已修复的问题及修复内容
-- 未修复的问题及理由（含与用户讨论达成的决策，下一轮 CR 会读此文件）
-- plan.md 是否同步更新；如未更新，说明为什么这些变更不影响最终方案事实
-- implementation-brief.md 是否同步更新；如未更新，说明原因
-- 测试运行结果
-```
-
-fix_context：第 2 轮起加 "这是第N轮修复。上一轮修复说明在 {dir_review_code}/fix-notes-r{N-1}.md。"
-
-run script 按 provider 使用精确续接：Claude Code 使用 `--resume <session_id>`，Codex 使用 `codex resume <session_id>`。
-
-续接来源同 revise：优先读取 `workflow-state.json` 中 implement phase 的 `session_id`；Claude 可回退 session name，Codex 必须有 `session_id`。
-
-### Phase 5.2: Verify Observability
-
-执行模式：Subagent phase。
-
-在 Code Review-Fix 循环 PASS 之后运行。
-
-```
-调用 /verify-observability skill。
-
-上下文参数：
-- 方案路径：{dir_design}/plan.md
-- 项目路径：{project_dir}
-- 报告输出路径：{dir_verify_obs}/observability-report.md
-{verify_obs_deploy_context}
-```
-
-verify_obs_deploy_context：如果用户提供了部署环境信息，加 "代码已部署到 {env} 环境，应用名为 {app_name}。请使用 MCP 工具进行运行时验证。" 如果未部署则加 "代码尚未部署，跳过运行时平台验证，仅做静态代码检查。"
-
-**编排器在 verify-observability 完成后**：
-1. 读取 observability-report.md 的 VERDICT
-2. 如果 PASS → 告知用户，进入汇总
-3. 如果 NEEDS_FIX → 告知用户需要补充可观测性，列出必须补充的项目，让用户自行修复或回到 implement session 修
+根 `workflow.json` 的每个 phase 通过 `prompt_template` 指向模板文件；`bin/validate-workflow-manifest` 会校验模板存在。模板占位符统一使用 `{token}`，由编排器传入：`project_dir`、`workspace_dir`、`task_name`、`phase_dir`、`phase_id`、`phase_name`、`round`、`output_file`、`requirement_file`、`plan_file`、`brief_file`、`review_latest`、`code_review_latest`、`context`、`bin_dir`、`state_file`。
+
+footer 规则：
+- Interactive phase 使用 `_footer-interactive.md`，包含用户确认后写 `workflow-state.json` 的完成命令。
+- Subagent phase 使用 `_footer-subagent.md`，约束只写指定报告、直接返回。
+- Shell noninteractive runner 使用 `_footer-noninteractive.md`，约束直接完成并退出。
+
+context 拼接规则：
+- `review-requirement`：如有项目路径，context 可提示快速扫描项目验证需求技术前提。
+- `explore`：context 是探索输入；优先来自用户 idea，其次来自 `requirement.md`。
+- `design`：如有 `explore/exploration.md`，context 加探索报告路径；如有 `requirement-review/requirement-review.md`，context 加需求审视报告路径。
+- `review-plan`：第 2 轮起，context 加上一轮 `review-r{N-1}.md` 和 `revise-notes-r{N-1}.md`，要求重点验证修正是否到位并检查新问题。
+- `revise`：第 2 轮起，context 加上一轮 `revise-notes-r{N-1}.md`；revise 续接 `design` session。
+- `implement`：如有 `review/review.md`，context 加评审报告路径，但实现仍以 `plan.md` 为准；如有最新 `revise-notes-rN.md`，context 加修正说明路径。
+- `review-code`：第 2 轮起，context 加上一轮 `code-review-r{N-1}.md` 和 `fix-notes-r{N-1}.md`，要求重点验证必须修改项是否已修复。
+- `fix`：第 2 轮起，context 加上一轮 `fix-notes-r{N-1}.md`；fix 续接 `implement` session。
+- `verify-observability`：如用户提供部署环境，context 加部署环境和应用名；否则提示只做静态代码检查。
+
+阶段后动作仍由编排器负责：
+- `review-plan` 完成后复制 `review-rN.md` 到 `review.md`。
+- `revise` 完成后复制 `design/plan-rN.md` 到 `design/plan.md`。
+- `review-code` 完成后复制 `code-review-rN.md` 到 `code-review.md`。
+- 所有阶段完成后运行 artifact 校验；失败时不推进下一阶段。
 
 ## Code Review-Fix 循环
 

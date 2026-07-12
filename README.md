@@ -23,7 +23,7 @@ Multi-Agent Development Orchestrator for Claude Code and Codex.
 - Flow manifest: repository `workflow.json` is the default phase manifest/template. Each run generates `<workspace>/workflow.json` with `kind: "run"` and `execution.order`; `workflow-state.json` records actual runtime state and points to that workspace workflow.
 - Execution contract: the run workflow records the actual phase order for this task. `orchestrate.sh` generates it from CLI/config flags and uses `execution.order` to set shell phase switches; review/revise and review-code/fix loops still execute through explicit shell loop code.
 - Shared utilities: script capabilities live in `bin/`; `orchestrate.sh` calls them and keeps orchestration logic thin.
-- Shared utilities: `bin/ghostty-open-tab`, `bin/detect-ghostty-window`, `bin/archive-workspace`, `bin/create-workflow-run`, `bin/workflow-state`, `bin/workflow-manifest`, `bin/find-agent-session`, `bin/validate-workflow-manifest`, `bin/validate-workflow-state`, `bin/validate-artifact`, `bin/validate-workspace-artifacts`, `bin/render-phase-run-script`, `bin/run-provider-noninteractive`
+- Shared utilities: `bin/ghostty-open-tab`, `bin/detect-ghostty-window`, `bin/archive-workspace`, `bin/create-workflow-run`, `bin/workflow-state`, `bin/workflow-manifest`, `bin/find-agent-session`, `bin/validate-workflow-manifest`, `bin/validate-workflow-state`, `bin/validate-artifact`, `bin/validate-workspace-artifacts`, `bin/render-prompt`, `bin/render-phase-run-script`, `bin/run-provider-noninteractive`
 - Runner modes:
   - `/workflow` uses bounded subagent phases for pure analysis/review/verification work when the provider exposes an Agent tool.
   - Interactive phases use Ghostty tabs for long-lived sessions and user confirmation.
@@ -75,6 +75,7 @@ Or use the workflow skill in a supported agent CLI:
 ├── orchestrate.sh
 ├── workflow.json
 ├── workflow-config.example.yaml
+├── prompts/
 ├── bin/
 ├── README.md
 ├── CHANGELOG.md

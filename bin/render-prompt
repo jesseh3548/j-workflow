@@ -1,0 +1,93 @@
+#!/usr/bin/env python3
+import argparse
+import os
+import re
+import sys
+
+
+TOKEN_RE = re.compile(r"\{[a-zA-Z_][a-zA-Z0-9_]*\}")
+FOOTER_FILES = {
+    "interactive": "_footer-interactive.md",
+    "subagent": "_footer-subagent.md",
+    "noninteractive": "_footer-noninteractive.md",
+    "none": None,
+}
+
+
+def read_text(path):
+    with open(path, "r", encoding="utf-8") as f:
+        return f.read()
+
+
+def substitute(text, variables):
+    def replace(match):
+        key = match.group(0)[1:-1]
+        if key in variables:
+            return variables[key]
+        return match.group(0)
+
+    return TOKEN_RE.sub(replace, text)
+
+
+def find_leftover_tokens(text):
+    return sorted(set(TOKEN_RE.findall(text)))
+
+
+def parse_var(raw):
+    if "=" not in raw:
+        raise argparse.ArgumentTypeError(f"--var must be key=value, got: {raw}")
+    key, value = raw.split("=", 1)
+    return key, value
+
+
+def build_parser():
+    parser = argparse.ArgumentParser(description="Render a j-workflow phase prompt from a template.")
+    parser.add_argument("--template", required=True, help="Path to the prompt template file.")
+    parser.add_argument("--footer", required=True, choices=sorted(FOOTER_FILES.keys()), help="Which footer to append.")
+    parser.add_argument("--var", action="append", default=[], help="key=value substitution, repeatable.")
+    parser.add_argument("--output", help="Write rendered prompt here instead of stdout.")
+    return parser
+
+
+def main():
+    args = build_parser().parse_args()
+
+    variables = {}
+    for raw in args.var:
+        key, value = parse_var(raw)
+        variables[key] = value
+
+    if not os.path.isfile(args.template):
+        print(f"[ERROR] template not found: {args.template}", file=sys.stderr)
+        return 1
+
+    rendered = substitute(read_text(args.template), variables)
+
+    footer_name = FOOTER_FILES[args.footer]
+    if footer_name:
+        footer_path = os.path.join(os.path.dirname(args.template), footer_name)
+        if not os.path.isfile(footer_path):
+            print(f"[ERROR] footer not found: {footer_path}", file=sys.stderr)
+            return 1
+        rendered += substitute(read_text(footer_path), variables)
+
+    leftover = find_leftover_tokens(rendered)
+    if leftover:
+        print(
+            f"[ERROR] unresolved tokens in rendered prompt: {', '.join(leftover)}",
+            file=sys.stderr,
+        )
+        return 1
+
+    if args.output:
+        output_dir = os.path.dirname(os.path.abspath(args.output))
+        os.makedirs(output_dir, exist_ok=True)
+        with open(args.output, "w", encoding="utf-8") as f:
+            f.write(rendered)
+    else:
+        sys.stdout.write(rendered)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

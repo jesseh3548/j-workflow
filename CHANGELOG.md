@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Extract phase prompts into `prompts/` templates rendered by `bin/render-prompt`, and teach the shell orchestrator and workflow manifest validator to use those templates (WP7 in `docs/plans/refactor-and-manifest-migration.md`).
 - Make `--resume` state-driven: phases skip only when state, output file, and artifact validation all pass; startup artifact validation is warning-only in resume mode, and review/fix loops can continue from the pending revise/fix round (WP6 in `docs/plans/refactor-and-manifest-migration.md`).
 - Add periodic wait hints and optional `--phase-timeout` / `phase_timeout` for interactive phases so a stuck agent can be manually unlocked or marked failed (WP5 in `docs/plans/refactor-and-manifest-migration.md`).
 - Add shared `bin/archive-workspace` and call it before non-resume runs so existing workspace artifacts are archived to `archive/round-N/` instead of being overwritten (WP4 in `docs/plans/refactor-and-manifest-migration.md`).

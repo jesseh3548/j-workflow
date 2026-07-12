@@ -221,7 +221,7 @@ Phase D（改名，随时可做，建议最后做避免和 C 冲突）:  WP11
 
 > 目标状态：`orchestrate.sh` 是一个**通用 phase 引擎**——读 workspace `workflow.json` 的 `execution.order`，逐个 phase 按 manifest 元数据执行；prompt、循环、断点、产物、verdict 全部由 manifest + 模板文件驱动；`workflow/SKILL.md` 不再复述任何 phase 契约，只描述编排器行为。改任何一个 phase 只需要改 manifest + 对应 prompt 模板。
 
-### WP7：Prompt 模板抽取（消除三处重复）
+### WP7：Prompt 模板抽取（消除三处重复） ✅（2026-07-13）
 
 **现状**：每个阶段的 prompt 在 `orchestrate.sh` heredoc 和 `workflow/SKILL.md`「各阶段 Prompt」里各写一遍，且已经漂移（SKILL.md 的 revise 有「三步走」和「决策确认规则」，shell 版没有；fix 的「决策确认规则」也只在 SKILL.md）。
 
