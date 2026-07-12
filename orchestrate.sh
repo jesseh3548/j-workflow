@@ -934,6 +934,12 @@ run_phase() {
     local session_name="${TASK_NAME}-${phase_name}"
     local resume_session_name=""
     local resume_session_id=""
+    local force_noninteractive="${JW_TEST_FORCE_NONINTERACTIVE-}"
+
+    if [[ "$force_noninteractive" == "1" ]]; then
+        run_analysis_phase "$phase_name" "$skill_name" "$prompt" "$output_file" "$log_dir"
+        return
+    fi
 
     if [[ -n "$resume_phase" ]]; then
         resume_session_name="${TASK_NAME}-${resume_phase}"
@@ -1196,312 +1202,383 @@ should_skip_phase() {
     return 0
 }
 
-# ── Phase 1: Explore ──
-
-EXPLORE_OUTPUT="$(phase_artifact_path "explore" "primary")"
-if [[ "$PHASE_EXPLORE" == true ]] && ! should_skip_phase "explore" "$EXPLORE_OUTPUT"; then
-    log_phase 1 "需求探索 (/explore)"
-
-    # 确定探索输入：优先用 idea，其次用 requirement
-    EXPLORE_INPUT=""
-    if [[ -n "$EXPLORE_IDEA" ]]; then
-        EXPLORE_INPUT="想法/方向：$EXPLORE_IDEA"
-    elif [[ -f "$WORKSPACE_DIR/requirement.md" ]]; then
-        EXPLORE_INPUT="参考需求文档 $WORKSPACE_DIR/requirement.md"
+phase_instance_name() {
+    local phase_id="$1"
+    local round="${2:-}"
+    if [[ -n "${FLOW_FILE:-}" && -f "${FLOW_FILE:-}" ]]; then
+        "$BIN_DIR/workflow-manifest" render-template \
+            --file "$FLOW_FILE" \
+            --phase "$phase_id" \
+            --field instance_name_template \
+            --var "round=$round" \
+            --var "phase_id=$phase_id" \
+            --var "phase_name=$phase_id" \
+            --var "task_name=$TASK_NAME" \
+            --var "workspace_dir=$WORKSPACE_DIR"
+        return
     fi
+    echo "$phase_id"
+}
 
-    EXPLORE_PROMPT="$(render_phase_prompt "explore" "interactive" "$EXPLORE_OUTPUT" "$EXPLORE_INPUT")"
-    run_phase "explore" "explore" "$EXPLORE_PROMPT" "$EXPLORE_OUTPUT" "$DIR_EXPLORE"
-
-    if [[ "$BP_AFTER_EXPLORE" == true ]]; then
-        wait_for_user "探索阶段完成，请审阅探索报告" "$EXPLORE_OUTPUT"
-    fi
-fi
-
-# ── Phase 2: Design ──
-
-DESIGN_OUTPUT="$(phase_artifact_path "design" "primary")"
-if [[ "$PHASE_DESIGN" == true ]] && ! should_skip_phase "design" "$DESIGN_OUTPUT"; then
-    log_phase 2 "方案设计 (/design)"
-
-    DESIGN_CONTEXT=""
-    if [[ -f "$DIR_EXPLORE/exploration.md" ]]; then
-        DESIGN_CONTEXT="探索报告在 $DIR_EXPLORE/exploration.md，请先阅读。"
-    fi
-
-    DESIGN_PROMPT="$(render_phase_prompt "design" "interactive" "$DESIGN_OUTPUT" "$DESIGN_CONTEXT")"
-    run_phase "design" "design" "$DESIGN_PROMPT" "$DESIGN_OUTPUT" "$DIR_DESIGN"
-
-    if [[ "$BP_AFTER_DESIGN" == true ]]; then
-        wait_for_user "方案设计完成，请审阅技术方案" "$DESIGN_OUTPUT" "跳过方案评审，直接进入实现"
-        if [[ "$WAIT_CHOICE" == "accept" ]]; then
-            PHASE_REVIEW_PLAN=false
+phase_runner() {
+    local phase_id="$1"
+    local runner=""
+    if [[ -n "${FLOW_FILE:-}" && -f "${FLOW_FILE:-}" ]]; then
+        runner="$("$BIN_DIR/workflow-manifest" phase-get --file "$FLOW_FILE" --phase "$phase_id" --field runner 2>/dev/null || true)"
+        if [[ -z "$runner" ]]; then
+            mode="$("$BIN_DIR/workflow-manifest" phase-get --file "$FLOW_FILE" --phase "$phase_id" --field mode 2>/dev/null || true)"
+            [[ "$mode" == "subagent" ]] && runner="noninteractive" || runner="interactive"
         fi
     fi
-fi
+    echo "${runner:-interactive}"
+}
 
-# ── Phase 3: Review-Revise Loop ──
-# 评审 → 修正 → 再评审，循环直到 VERDICT: PASS
+phase_resume_from() {
+    local phase_id="$1"
+    if [[ -n "${FLOW_FILE:-}" && -f "${FLOW_FILE:-}" ]]; then
+        "$BIN_DIR/workflow-manifest" phase-get --file "$FLOW_FILE" --phase "$phase_id" --field resume_from 2>/dev/null || true
+    fi
+}
 
-REVIEW_ROUND=0
-REVIEW_LATEST="$(phase_artifact_path "review-plan" "latest")"
-REVIEW_RESUME_REVISE_ROUND=0
+phase_loop_name() {
+    local phase_id="$1"
+    if [[ -n "${FLOW_FILE:-}" && -f "${FLOW_FILE:-}" ]]; then
+        "$BIN_DIR/workflow-manifest" phase-get --file "$FLOW_FILE" --phase "$phase_id" --field loop 2>/dev/null || true
+    fi
+}
 
-REVIEW_ALREADY_PASSED=false
-if [[ "$RESUME_MODE" == true && -f "$REVIEW_LATEST" ]]; then
-    if validate_phase_artifact "review-plan" "$REVIEW_LATEST" && artifact_verdict_is_pass "$REVIEW_LATEST"; then
-        log_info "跳过 review（已有已校验 VERDICT: PASS）"
-        REVIEW_ALREADY_PASSED=true
+loop_field() {
+    "$BIN_DIR/workflow-manifest" loop-get --file "$FLOW_FILE" --loop "$1" --field "$2"
+}
+
+runtime_skips=""
+add_runtime_skip() {
+    runtime_skips="$runtime_skips $1 "
+}
+
+is_runtime_skipped() {
+    [[ "$runtime_skips" == *" $1 "* ]]
+}
+
+is_loop_fixup_phase() {
+    local phase_id="$1"
+    local loop_name
+    loop_name="$(phase_loop_name "$phase_id")"
+    [[ -z "$loop_name" ]] && return 1
+    [[ "$(loop_field "$loop_name" fixup_phase 2>/dev/null || true)" == "$phase_id" ]]
+}
+
+phase_breakpoint_enabled() {
+    local phase_id="$1"
+    [[ "$AUTO_MODE" == true ]] && { echo "false"; return; }
+    if [[ -n "${FLOW_FILE:-}" && -f "${FLOW_FILE:-}" ]]; then
+        "$BIN_DIR/workflow-manifest" breakpoint-after --file "$FLOW_FILE" --phase "$phase_id" 2>/dev/null || echo "false"
     else
-        REVIEW_TRANSITION_RESUME="$(phase_transition_for_artifact "review-plan" "$REVIEW_LATEST" 2>/dev/null || true)"
-        if [[ "$REVIEW_TRANSITION_RESUME" == "revise" ]]; then
-            REVIEW_META_LOOP="$(get_workflow_meta current_loop)"
-            REVIEW_META_ROUND="$(get_workflow_meta current_round)"
-            if [[ "$REVIEW_META_LOOP" == "design-review" && "$REVIEW_META_ROUND" =~ ^[0-9]+$ && "$REVIEW_META_ROUND" -gt 0 ]]; then
-                REVISE_RESUME_OUTPUT="$(phase_artifact_path "revise" "primary" "$REVIEW_META_ROUND")"
-                if [[ -f "$REVISE_RESUME_OUTPUT" ]] && validate_phase_artifact "revise" "$REVISE_RESUME_OUTPUT"; then
-                    REVIEW_ROUND="$REVIEW_META_ROUND"
-                    log_info "resume: 第${REVIEW_META_ROUND}轮 revise 已存在，下一步从第$((REVIEW_META_ROUND + 1))轮 review-plan 继续"
+        echo "false"
+    fi
+}
+
+maybe_breakpoint() {
+    local phase_id="$1"
+    local output_file="$2"
+    local enabled
+    enabled="$(phase_breakpoint_enabled "$phase_id")"
+    [[ "$enabled" != "true" ]] && return 0
+
+    case "$phase_id" in
+        explore)
+            wait_for_user "探索阶段完成，请审阅探索报告" "$output_file"
+            ;;
+        design)
+            wait_for_user "方案设计完成，请审阅技术方案" "$output_file" "跳过方案评审，直接进入实现"
+            [[ "$WAIT_CHOICE" == "accept" ]] && add_runtime_skip "review-plan"
+            ;;
+        implement)
+            wait_for_user "实现完成，请审阅实现说明" "$output_file" "跳过代码评审，直接结束"
+            [[ "$WAIT_CHOICE" == "accept" ]] && add_runtime_skip "review-code"
+            ;;
+    esac
+}
+
+review_breakpoint() {
+    local loop_name="$1"
+    local round="$2"
+    local output_file="$3"
+    local review_phase
+    review_phase="$(loop_field "$loop_name" review_phase)"
+    [[ "$(phase_breakpoint_enabled "$review_phase")" != "true" ]] && return 0
+
+    case "$loop_name" in
+        design-review)
+            wait_for_user "第${round}轮评审完成，方案需要修正" "$output_file" "接受当前方案，跳过修正并进入实现"
+            ;;
+        code-review-fix)
+            wait_for_user "第${round}轮代码评审完成，代码需要修复" "$output_file" "接受当前代码，跳过修复并结束评审循环"
+            ;;
+    esac
+}
+
+single_phase_context() {
+    local phase_id="$1"
+    case "$phase_id" in
+        explore)
+            if [[ -n "$EXPLORE_IDEA" ]]; then
+                echo "Idea: $EXPLORE_IDEA"
+            elif [[ -f "$WORKSPACE_DIR/requirement.md" ]]; then
+                echo "Reference requirement document: $WORKSPACE_DIR/requirement.md"
+            fi
+            ;;
+        design)
+            local context=""
+            if [[ -f "$DIR_EXPLORE/exploration.md" ]]; then
+                context="Exploration output: $DIR_EXPLORE/exploration.md. Read it first."
+            fi
+            if [[ -f "$WORKSPACE_DIR/requirement-review/requirement-review.md" ]]; then
+                context="${context} Requirement review output: $WORKSPACE_DIR/requirement-review/requirement-review.md. Read it first and incorporate valid concerns into the design."
+            fi
+            echo "$context"
+            ;;
+        implement)
+            local context=""
+            if [[ -f "$DIR_REVIEW/review.md" ]]; then
+                context="Design review output: $DIR_REVIEW/review.md."
+            fi
+            if [[ -n "${LAST_REVISE_OUTPUT:-}" && -f "$LAST_REVISE_OUTPUT" ]]; then
+                context="${context} Design revise notes: $LAST_REVISE_OUTPUT. Pay attention to adopted review findings."
+            fi
+            echo "$context"
+            ;;
+        *) echo "" ;;
+    esac
+}
+
+
+review_context() {
+    local loop_name="$1"
+    local round="$2"
+    if [[ "$round" -le 1 ]]; then
+        echo ""
+        return
+    fi
+    case "$loop_name" in
+        design-review)
+            local prev_review prev_fixup
+            prev_review="$(phase_artifact_path "review-plan" "primary" "$((round-1))")"
+            prev_fixup="$(phase_artifact_path "revise" "primary" "$((round-1))")"
+            echo "This is review round ${round}. Previous review: $prev_review. Previous revise notes: $prev_fixup. Verify previous findings were addressed and no new issues were introduced."
+            ;;
+        code-review-fix)
+            local prev_review prev_fixup
+            prev_review="$(phase_artifact_path "review-code" "primary" "$((round-1))")"
+            prev_fixup="$(phase_artifact_path "fix" "primary" "$((round-1))")"
+            echo "This is code review round ${round}. Previous code review: $prev_review. Previous fix notes: $prev_fixup. Verify required fixes were completed and no new issues were introduced."
+            ;;
+    esac
+}
+
+fixup_context() {
+    local loop_name="$1"
+    local round="$2"
+    if [[ "$round" -le 1 ]]; then
+        echo ""
+        return
+    fi
+    case "$loop_name" in
+        design-review)
+            local prev_fixup
+            prev_fixup="$(phase_artifact_path "revise" "primary" "$((round-1))")"
+            echo "This is revise round ${round}. Previous revise notes: $prev_fixup."
+            ;;
+        code-review-fix)
+            local prev_fixup
+            prev_fixup="$(phase_artifact_path "fix" "primary" "$((round-1))")"
+            echo "This is fix round ${round}. Previous fix notes: $prev_fixup."
+            ;;
+    esac
+}
+
+run_phase_instance() {
+    local phase_id="$1"
+    local phase_name="$2"
+    local round="$3"
+    local context="$4"
+    local output_file="$5"
+    local skip_resume_check="${6:-false}"
+    local runner
+    local prompt
+    local footer
+    local log_dir
+    local resume_from
+
+    if [[ "$skip_resume_check" != true ]] && should_skip_phase "$phase_name" "$output_file" "$phase_id"; then
+        return 0
+    fi
+
+    runner="$(phase_runner "$phase_id")"
+    if [[ "${JW_TEST_FORCE_NONINTERACTIVE-}" == "1" ]]; then
+        runner="noninteractive"
+    fi
+    footer="$runner"
+    [[ "$runner" == "interactive" ]] && footer="interactive"
+    prompt="$(render_phase_prompt "$phase_id" "$footer" "$output_file" "$context" "$round" "$phase_name")"
+    log_dir="$(phase_dir_for "$phase_id")"
+
+    if [[ "$runner" == "noninteractive" ]]; then
+        run_analysis_phase "$phase_name" "$phase_id" "$prompt" "$output_file" "$log_dir"
+    else
+        resume_from="$(phase_resume_from "$phase_id")"
+        run_phase "$phase_name" "$phase_id" "$prompt" "$output_file" "$log_dir" "$resume_from"
+    fi
+}
+
+apply_phase_updates() {
+    local phase_id="$1"
+    local round="$2"
+    local path
+    while IFS= read -r path; do
+        [[ -z "$path" ]] && continue
+        local source="$WORKSPACE_DIR/$path"
+        if [[ "$path" == *"-r${round}."* ]]; then
+            local target="$WORKSPACE_DIR/${path/-r${round}/}"
+            if [[ -f "$source" && "$source" != "$target" ]]; then
+                cp "$source" "$target"
+            fi
+        fi
+    done < <("$BIN_DIR/workflow-manifest" artifact --file "$FLOW_FILE" --phase "$phase_id" --kind updates --var "round=$round" 2>/dev/null || true)
+}
+
+run_single_phase() {
+    local phase_id="$1"
+    local output_file
+    local context
+    local phase_name
+
+    output_file="$(phase_artifact_path "$phase_id" "primary")"
+    context="$(single_phase_context "$phase_id")"
+    phase_name="$(phase_instance_name "$phase_id")"
+    log_phase "$phase_id" "$phase_id"
+    run_phase_instance "$phase_id" "$phase_name" "" "$context" "$output_file"
+    maybe_breakpoint "$phase_id" "$output_file"
+}
+
+run_review_loop() {
+    local loop_name="$1"
+    local review_phase fixup_phase latest round resume_fixup_round already_passed
+    review_phase="$(loop_field "$loop_name" review_phase)"
+    fixup_phase="$(loop_field "$loop_name" fixup_phase)"
+    latest="$(phase_artifact_path "$review_phase" "latest")"
+    round=0
+    resume_fixup_round=0
+    already_passed=false
+
+    if [[ "$RESUME_MODE" == true && -f "$latest" ]]; then
+        if validate_phase_artifact "$review_phase" "$latest" && artifact_verdict_is_pass "$latest"; then
+            log_info "跳过 $review_phase（已有已校验 VERDICT: PASS）"
+            already_passed=true
+        else
+            local resume_transition meta_loop meta_round fixup_resume_output
+            resume_transition="$(phase_transition_for_artifact "$review_phase" "$latest" 2>/dev/null || true)"
+            meta_loop="$(get_workflow_meta current_loop)"
+            meta_round="$(get_workflow_meta current_round)"
+            if [[ "$resume_transition" == "$fixup_phase" && "$meta_loop" == "$loop_name" && "$meta_round" =~ ^[0-9]+$ && "$meta_round" -gt 0 ]]; then
+                fixup_resume_output="$(phase_artifact_path "$fixup_phase" "primary" "$meta_round")"
+                if [[ -f "$fixup_resume_output" ]] && validate_phase_artifact "$fixup_phase" "$fixup_resume_output"; then
+                    round="$meta_round"
+                    log_info "resume: 第${meta_round}轮 $fixup_phase 已存在，下一步从第$((meta_round + 1))轮 $review_phase 继续"
                 else
-                    REVIEW_ROUND=$((REVIEW_META_ROUND - 1))
-                    REVIEW_RESUME_REVISE_ROUND="$REVIEW_META_ROUND"
-                    log_info "resume: 第${REVIEW_META_ROUND}轮 review-plan 已要求修正，直接进入 revise-r${REVIEW_META_ROUND}"
+                    round=$((meta_round - 1))
+                    resume_fixup_round="$meta_round"
+                    log_info "resume: 第${meta_round}轮 $review_phase 已要求处理，直接进入 ${fixup_phase}-r${meta_round}"
                 fi
             fi
         fi
     fi
-fi
 
-if [[ "$PHASE_REVIEW_PLAN" == true && "$REVIEW_ALREADY_PASSED" == false ]]; then
+    [[ "$already_passed" == true ]] && return 0
+
     while true; do
-        REVIEW_ROUND=$((REVIEW_ROUND + 1))
-        if (( REVIEW_ROUND > MAX_ROUNDS )); then
-            if handle_loop_limit "design-review" "$((REVIEW_ROUND - 1))"; then
-                MAX_ROUNDS="$REVIEW_ROUND"
+        round=$((round + 1))
+        if (( round > MAX_ROUNDS )); then
+            if handle_loop_limit "$loop_name" "$((round - 1))"; then
+                MAX_ROUNDS="$round"
             else
                 break
             fi
         fi
-        state_cmd set-workflow-meta --file "$STATE_FILE" --key current_loop --value "design-review"
-        state_cmd set-workflow-meta --file "$STATE_FILE" --key current_round --value "$REVIEW_ROUND"
-        REVIEW_OUTPUT="$(phase_artifact_path "review-plan" "primary" "$REVIEW_ROUND")"
-        REVISE_OUTPUT="$(phase_artifact_path "revise" "primary" "$REVIEW_ROUND")"
-        PLAN_ROUND_OUTPUT="$DIR_DESIGN/plan-r${REVIEW_ROUND}.md"
 
-        if [[ "$REVIEW_RESUME_REVISE_ROUND" == "$REVIEW_ROUND" ]]; then
-            log_phase "3" "方案评审 第${REVIEW_ROUND}轮已完成（resume）"
-            if [[ ! -f "$REVIEW_OUTPUT" && -f "$REVIEW_LATEST" ]]; then
-                cp "$REVIEW_LATEST" "$REVIEW_OUTPUT"
+        state_cmd set-workflow-meta --file "$STATE_FILE" --key current_loop --value "$loop_name"
+        state_cmd set-workflow-meta --file "$STATE_FILE" --key current_round --value "$round"
+        local review_output fixup_output review_name fixup_name transition context
+        review_output="$(phase_artifact_path "$review_phase" "primary" "$round")"
+        fixup_output="$(phase_artifact_path "$fixup_phase" "primary" "$round")"
+        review_name="$(phase_instance_name "$review_phase" "$round")"
+        fixup_name="$(phase_instance_name "$fixup_phase" "$round")"
+
+        if [[ "$resume_fixup_round" == "$round" ]]; then
+            log_phase "$review_phase" "$review_phase 第${round}轮已完成（resume）"
+            if [[ ! -f "$review_output" && -f "$latest" ]]; then
+                cp "$latest" "$review_output"
             fi
-            REVIEW_TRANSITION="revise"
+            transition="$fixup_phase"
         else
-            log_phase "3" "方案评审 第${REVIEW_ROUND}轮 (/review-plan)"
-
-            # 构建评审上下文：第 2 轮起告知评审者这是复审
-            REVIEW_CONTEXT=""
-            if [[ $REVIEW_ROUND -gt 1 ]]; then
-                PREV_REVIEW_OUTPUT="$(phase_artifact_path "review-plan" "primary" "$((REVIEW_ROUND-1))")"
-                PREV_REVISE_OUTPUT="$(phase_artifact_path "revise" "primary" "$((REVIEW_ROUND-1))")"
-                REVIEW_CONTEXT="这是第${REVIEW_ROUND}轮评审。上一轮评审报告在 $PREV_REVIEW_OUTPUT，方案修正说明在 $PREV_REVISE_OUTPUT。请重点验证上轮提出的问题是否已修正到位，同时检查修正是否引入新问题。"
-            fi
-
-            REVIEW_PROMPT="$(render_phase_prompt "review-plan" "noninteractive" "$REVIEW_OUTPUT" "$REVIEW_CONTEXT" "$REVIEW_ROUND" "review-plan-r${REVIEW_ROUND}")"
-            run_analysis_phase "review-plan-r${REVIEW_ROUND}" "review-plan" "$REVIEW_PROMPT" "$REVIEW_OUTPUT" "$DIR_REVIEW"
-
-            # 保持 review.md 始终指向最新版
-            cp "$REVIEW_OUTPUT" "$REVIEW_LATEST" 2>/dev/null || true
+            log_phase "$review_phase" "$review_phase 第${round}轮"
+            context="$(review_context "$loop_name" "$round")"
+            run_phase_instance "$review_phase" "$review_name" "$round" "$context" "$review_output" true
+            cp "$review_output" "$latest" 2>/dev/null || true
             if ! validate_workspace_artifacts; then
-                log_error "review-plan 完成后 workspace 产物命名/指针校验失败，请修订 $WORKSPACE_DIR"
+                log_error "$review_phase 完成后 workspace 产物命名/指针校验失败，请修订 $WORKSPACE_DIR"
                 exit 1
             fi
-
-            # 检查评审结论
-            REVIEW_TRANSITION="$(phase_transition_for_artifact "review-plan" "$REVIEW_OUTPUT")"
+            transition="$(phase_transition_for_artifact "$review_phase" "$review_output")"
         fi
-        state_cmd set-phase-field --file "$STATE_FILE" --phase "review-plan-r${REVIEW_ROUND}" --key round --value "$REVIEW_ROUND"
-        state_cmd set-phase-field --file "$STATE_FILE" --phase "review-plan-r${REVIEW_ROUND}" --key loop --value "design-review"
-        state_cmd set-phase-field --file "$STATE_FILE" --phase "review-plan-r${REVIEW_ROUND}" --key transition --value "$REVIEW_TRANSITION"
-        if [[ "$REVIEW_TRANSITION" == "continue" ]]; then
-            log_success "方案评审通过（第${REVIEW_ROUND}轮）"
+
+        state_cmd set-phase-field --file "$STATE_FILE" --phase "$review_name" --key round --value "$round"
+        state_cmd set-phase-field --file "$STATE_FILE" --phase "$review_name" --key loop --value "$loop_name"
+        state_cmd set-phase-field --file "$STATE_FILE" --phase "$review_name" --key transition --value "$transition"
+        if [[ "$transition" == "continue" ]]; then
+            log_success "$review_phase 通过（第${round}轮）"
             break
         fi
-        if [[ "$REVIEW_TRANSITION" != "revise" ]]; then
-            log_error "未知 review-plan transition: $REVIEW_TRANSITION"
+        if [[ "$transition" != "$fixup_phase" ]]; then
+            log_error "未知 $review_phase transition: $transition"
             exit 1
         fi
 
-        # 断点：让用户看评审结果
-        if [[ "$BP_AFTER_REVIEW" == true && "$REVIEW_RESUME_REVISE_ROUND" != "$REVIEW_ROUND" ]]; then
-            wait_for_user "第${REVIEW_ROUND}轮评审完成，方案需要修正" "$REVIEW_OUTPUT" "接受当前方案，跳过修正并进入实现"
-            if [[ "$WAIT_CHOICE" == "accept" ]]; then
-                break
-            fi
+        if [[ "$resume_fixup_round" != "$round" ]]; then
+            review_breakpoint "$loop_name" "$round" "$review_output"
+            [[ "${WAIT_CHOICE:-}" == "accept" ]] && break
         fi
 
-        # ── Revise ──
-        log_phase "3.5" "方案修正 第${REVIEW_ROUND}轮"
-
-        REVISE_CONTEXT=""
-        if [[ $REVIEW_ROUND -gt 1 ]]; then
-            PREV_REVISE_OUTPUT="$(phase_artifact_path "revise" "primary" "$((REVIEW_ROUND-1))")"
-            REVISE_CONTEXT="这是第${REVIEW_ROUND}轮修正。上一轮修正说明在 $PREV_REVISE_OUTPUT。"
+        log_phase "$fixup_phase" "$fixup_phase 第${round}轮"
+        context="$(fixup_context "$loop_name" "$round")"
+        run_phase_instance "$fixup_phase" "$fixup_name" "$round" "$context" "$fixup_output" true
+        state_cmd set-phase-field --file "$STATE_FILE" --phase "$fixup_name" --key round --value "$round"
+        state_cmd set-phase-field --file "$STATE_FILE" --phase "$fixup_name" --key loop --value "$loop_name"
+        state_cmd set-phase-field --file "$STATE_FILE" --phase "$fixup_name" --key resume_from --value "$(phase_resume_from "$fixup_phase")"
+        apply_phase_updates "$fixup_phase" "$round"
+        if [[ "$fixup_phase" == "revise" ]]; then
+            LAST_REVISE_OUTPUT="$fixup_output"
         fi
-
-        # revise 续接 design session（同一个 agent 修正自己的方案）
-        REVISE_PROMPT="$(render_phase_prompt "revise" "interactive" "$REVISE_OUTPUT" "$REVISE_CONTEXT" "$REVIEW_ROUND" "revise-r${REVIEW_ROUND}")"
-        run_phase "revise-r${REVIEW_ROUND}" "revise" "$REVISE_PROMPT" "$REVISE_OUTPUT" "$DIR_REVIEW" "design"
-        state_cmd set-phase-field --file "$STATE_FILE" --phase "revise-r${REVIEW_ROUND}" --key round --value "$REVIEW_ROUND"
-        state_cmd set-phase-field --file "$STATE_FILE" --phase "revise-r${REVIEW_ROUND}" --key loop --value "design-review"
-        state_cmd set-phase-field --file "$STATE_FILE" --phase "revise-r${REVIEW_ROUND}" --key resume_from --value "design"
-
-        # 保持 plan.md 始终指向最新版
-        cp "$PLAN_ROUND_OUTPUT" "$DIR_DESIGN/plan.md" 2>/dev/null || true
-
-        log_success "第${REVIEW_ROUND}轮方案修正完成，进入下一轮评审"
+        log_success "第${round}轮 $fixup_phase 完成，进入下一轮 $review_phase"
     done
-fi
+}
 
-# ── Phase 4: Implement ──
-
-IMPLEMENT_OUTPUT="$(phase_artifact_path "implement" "primary")"
-if [[ "$PHASE_IMPLEMENT" == true ]] && ! should_skip_phase "implement" "$IMPLEMENT_OUTPUT"; then
-    log_phase 4 "TDD 实现 (/implement)"
-
-    IMPL_CONTEXT=""
-    if [[ -f "$DIR_REVIEW/review.md" ]]; then
-        IMPL_CONTEXT="评审反馈在 $DIR_REVIEW/review.md。"
+while IFS= read -r phase_id; do
+    if is_runtime_skipped "$phase_id"; then
+        log_info "跳过 $phase_id（运行时断点选择）"
+        continue
     fi
-    if [[ -n "${REVISE_OUTPUT:-}" && -f "$REVISE_OUTPUT" ]]; then
-        IMPL_CONTEXT="${IMPL_CONTEXT}方案修正说明在 $REVISE_OUTPUT，注意哪些评审意见已被采纳。"
+    if is_loop_fixup_phase "$phase_id"; then
+        continue
     fi
-
-    IMPLEMENT_PROMPT="$(render_phase_prompt "implement" "interactive" "$IMPLEMENT_OUTPUT" "$IMPL_CONTEXT")"
-    run_phase "implement" "implement" "$IMPLEMENT_PROMPT" "$IMPLEMENT_OUTPUT" "$DIR_IMPLEMENT"
-
-    if [[ "$BP_AFTER_IMPLEMENT" == true ]]; then
-        wait_for_user "实现完成，请审阅实现说明" "$IMPLEMENT_OUTPUT" "跳过代码评审，直接结束"
-        if [[ "$WAIT_CHOICE" == "accept" ]]; then
-            PHASE_REVIEW_CODE=false
-        fi
-    fi
-fi
-
-# ── Phase 5: Code Review-Fix Loop ──
-# 代码评审 → 修复 → 再评审，循环直到 VERDICT: PASS
-
-CODE_REVIEW_ROUND=0
-CODE_REVIEW_LATEST="$(phase_artifact_path "review-code" "latest")"
-CODE_REVIEW_RESUME_FIX_ROUND=0
-
-CODE_REVIEW_ALREADY_PASSED=false
-if [[ "$RESUME_MODE" == true && -f "$CODE_REVIEW_LATEST" ]]; then
-    if validate_phase_artifact "review-code" "$CODE_REVIEW_LATEST" && artifact_verdict_is_pass "$CODE_REVIEW_LATEST"; then
-        log_info "跳过 review-code（已有已校验 VERDICT: PASS）"
-        CODE_REVIEW_ALREADY_PASSED=true
+    loop_name="$(phase_loop_name "$phase_id")"
+    if [[ -n "$loop_name" && "$(loop_field "$loop_name" review_phase)" == "$phase_id" ]]; then
+        run_review_loop "$loop_name"
     else
-        CODE_REVIEW_TRANSITION_RESUME="$(phase_transition_for_artifact "review-code" "$CODE_REVIEW_LATEST" 2>/dev/null || true)"
-        if [[ "$CODE_REVIEW_TRANSITION_RESUME" == "fix" ]]; then
-            CODE_REVIEW_META_LOOP="$(get_workflow_meta current_loop)"
-            CODE_REVIEW_META_ROUND="$(get_workflow_meta current_round)"
-            if [[ "$CODE_REVIEW_META_LOOP" == "code-review-fix" && "$CODE_REVIEW_META_ROUND" =~ ^[0-9]+$ && "$CODE_REVIEW_META_ROUND" -gt 0 ]]; then
-                FIX_RESUME_OUTPUT="$(phase_artifact_path "fix" "primary" "$CODE_REVIEW_META_ROUND")"
-                if [[ -f "$FIX_RESUME_OUTPUT" ]] && validate_phase_artifact "fix" "$FIX_RESUME_OUTPUT"; then
-                    CODE_REVIEW_ROUND="$CODE_REVIEW_META_ROUND"
-                    log_info "resume: 第${CODE_REVIEW_META_ROUND}轮 fix 已存在，下一步从第$((CODE_REVIEW_META_ROUND + 1))轮 review-code 继续"
-                else
-                    CODE_REVIEW_ROUND=$((CODE_REVIEW_META_ROUND - 1))
-                    CODE_REVIEW_RESUME_FIX_ROUND="$CODE_REVIEW_META_ROUND"
-                    log_info "resume: 第${CODE_REVIEW_META_ROUND}轮 review-code 已要求修复，直接进入 fix-r${CODE_REVIEW_META_ROUND}"
-                fi
-            fi
-        fi
+        run_single_phase "$phase_id"
     fi
-fi
+done < <("$BIN_DIR/workflow-manifest" execution-order --file "$FLOW_FILE" --kind order)
 
-if [[ "$PHASE_REVIEW_CODE" == true && "$CODE_REVIEW_ALREADY_PASSED" == false ]]; then
-    while true; do
-        CODE_REVIEW_ROUND=$((CODE_REVIEW_ROUND + 1))
-        if (( CODE_REVIEW_ROUND > MAX_ROUNDS )); then
-            if handle_loop_limit "code-review-fix" "$((CODE_REVIEW_ROUND - 1))"; then
-                MAX_ROUNDS="$CODE_REVIEW_ROUND"
-            else
-                break
-            fi
-        fi
-        state_cmd set-workflow-meta --file "$STATE_FILE" --key current_loop --value "code-review-fix"
-        state_cmd set-workflow-meta --file "$STATE_FILE" --key current_round --value "$CODE_REVIEW_ROUND"
-        CODE_REVIEW_OUTPUT="$(phase_artifact_path "review-code" "primary" "$CODE_REVIEW_ROUND")"
-        FIX_OUTPUT="$(phase_artifact_path "fix" "primary" "$CODE_REVIEW_ROUND")"
-
-        if [[ "$CODE_REVIEW_RESUME_FIX_ROUND" == "$CODE_REVIEW_ROUND" ]]; then
-            log_phase "5" "代码评审 第${CODE_REVIEW_ROUND}轮已完成（resume）"
-            if [[ ! -f "$CODE_REVIEW_OUTPUT" && -f "$CODE_REVIEW_LATEST" ]]; then
-                cp "$CODE_REVIEW_LATEST" "$CODE_REVIEW_OUTPUT"
-            fi
-            CODE_REVIEW_TRANSITION="fix"
-        else
-            log_phase "5" "代码评审 第${CODE_REVIEW_ROUND}轮 (/review-code)"
-
-            # 构建评审上下文：第 2 轮起告知评审者这是复审
-            CODE_REVIEW_CONTEXT=""
-            if [[ $CODE_REVIEW_ROUND -gt 1 ]]; then
-                PREV_CODE_REVIEW_OUTPUT="$(phase_artifact_path "review-code" "primary" "$((CODE_REVIEW_ROUND-1))")"
-                PREV_FIX_OUTPUT="$(phase_artifact_path "fix" "primary" "$((CODE_REVIEW_ROUND-1))")"
-                CODE_REVIEW_CONTEXT="这是第${CODE_REVIEW_ROUND}轮代码评审。上一轮评审报告在 $PREV_CODE_REVIEW_OUTPUT，修复说明在 $PREV_FIX_OUTPUT。请重点验证上轮提出的必须修改项是否已修复到位，同时检查修复是否引入新问题。"
-            fi
-
-            CODE_REVIEW_PROMPT="$(render_phase_prompt "review-code" "noninteractive" "$CODE_REVIEW_OUTPUT" "$CODE_REVIEW_CONTEXT" "$CODE_REVIEW_ROUND" "review-code-r${CODE_REVIEW_ROUND}")"
-            run_analysis_phase "review-code-r${CODE_REVIEW_ROUND}" "review-code" "$CODE_REVIEW_PROMPT" "$CODE_REVIEW_OUTPUT" "$DIR_REVIEW_CODE"
-
-            # 保持 code-review.md 始终指向最新版
-            cp "$CODE_REVIEW_OUTPUT" "$CODE_REVIEW_LATEST" 2>/dev/null || true
-            if ! validate_workspace_artifacts; then
-                log_error "review-code 完成后 workspace 产物命名/指针校验失败，请修订 $WORKSPACE_DIR"
-                exit 1
-            fi
-
-            # 检查评审结论
-            CODE_REVIEW_TRANSITION="$(phase_transition_for_artifact "review-code" "$CODE_REVIEW_OUTPUT")"
-        fi
-        state_cmd set-phase-field --file "$STATE_FILE" --phase "review-code-r${CODE_REVIEW_ROUND}" --key round --value "$CODE_REVIEW_ROUND"
-        state_cmd set-phase-field --file "$STATE_FILE" --phase "review-code-r${CODE_REVIEW_ROUND}" --key loop --value "code-review-fix"
-        state_cmd set-phase-field --file "$STATE_FILE" --phase "review-code-r${CODE_REVIEW_ROUND}" --key transition --value "$CODE_REVIEW_TRANSITION"
-        if [[ "$CODE_REVIEW_TRANSITION" == "continue" ]]; then
-            log_success "代码评审通过（第${CODE_REVIEW_ROUND}轮）"
-            break
-        fi
-        if [[ "$CODE_REVIEW_TRANSITION" != "fix" ]]; then
-            log_error "未知 review-code transition: $CODE_REVIEW_TRANSITION"
-            exit 1
-        fi
-
-        # 断点：让用户看评审结果
-        if [[ "$BP_AFTER_REVIEW_CODE" == true && "$CODE_REVIEW_RESUME_FIX_ROUND" != "$CODE_REVIEW_ROUND" ]]; then
-            wait_for_user "第${CODE_REVIEW_ROUND}轮代码评审完成，代码需要修复" "$CODE_REVIEW_OUTPUT" "接受当前代码，跳过修复并结束评审循环"
-            if [[ "$WAIT_CHOICE" == "accept" ]]; then
-                break
-            fi
-        fi
-
-        # ── Fix ──
-        log_phase "5.5" "代码修复 第${CODE_REVIEW_ROUND}轮"
-
-        FIX_CONTEXT=""
-        if [[ $CODE_REVIEW_ROUND -gt 1 ]]; then
-            PREV_FIX_OUTPUT="$(phase_artifact_path "fix" "primary" "$((CODE_REVIEW_ROUND-1))")"
-            FIX_CONTEXT="这是第${CODE_REVIEW_ROUND}轮修复。上一轮修复说明在 $PREV_FIX_OUTPUT。"
-        fi
-
-        # fix 续接 implement session（同一个 agent 修复自己的代码）
-        FIX_PROMPT="$(render_phase_prompt "fix" "interactive" "$FIX_OUTPUT" "$FIX_CONTEXT" "$CODE_REVIEW_ROUND" "fix-r${CODE_REVIEW_ROUND}")"
-        run_phase "fix-r${CODE_REVIEW_ROUND}" "fix" "$FIX_PROMPT" "$FIX_OUTPUT" "$DIR_REVIEW_CODE" "implement"
-        state_cmd set-phase-field --file "$STATE_FILE" --phase "fix-r${CODE_REVIEW_ROUND}" --key round --value "$CODE_REVIEW_ROUND"
-        state_cmd set-phase-field --file "$STATE_FILE" --phase "fix-r${CODE_REVIEW_ROUND}" --key loop --value "code-review-fix"
-        state_cmd set-phase-field --file "$STATE_FILE" --phase "fix-r${CODE_REVIEW_ROUND}" --key resume_from --value "implement"
-
-        log_success "第${CODE_REVIEW_ROUND}轮代码修复完成，进入下一轮评审"
-    done
-fi
 validate_workflow_state
 validate_workspace_artifacts
 
@@ -1517,6 +1594,11 @@ echo ""
 echo -e "工作区: ${BOLD}$WORKSPACE_DIR${NC}"
 echo ""
 echo "产出文件:"
+EXPLORE_OUTPUT="$(phase_artifact_path "explore" "primary")"
+DESIGN_OUTPUT="$(phase_artifact_path "design" "primary")"
+REVIEW_LATEST="$(phase_artifact_path "review-plan" "latest")"
+IMPLEMENT_OUTPUT="$(phase_artifact_path "implement" "primary")"
+CODE_REVIEW_LATEST="$(phase_artifact_path "review-code" "latest")"
 
 # 按阶段列出产出
 for entry in \

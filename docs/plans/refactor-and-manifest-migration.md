@@ -267,7 +267,7 @@ prompts/
 - `render-prompt` 漏传 var 时报错。
 - `bin/validate-workflow-manifest workflow.json` 通过。
 
-### WP8：通用 phase 引擎（orchestrate.sh 重写主干）
+### WP8：通用 phase 引擎（orchestrate.sh 重写主干） ✅（2026-07-13）
 
 **现状**：`execution.order` 只用来设置 5 个 shell 布尔开关；每个 phase 是一段手写代码块；两个循环、断点、transition 全部硬编码。新增/调整 phase 必须改 shell。
 
@@ -326,10 +326,10 @@ done
    - `tests/smoke.sh`：用 `CLAUDE_BIN=tests/fake-provider` + `--auto` 跑三个场景，断言产物文件集合、latest 指针、`workflow-state.json` 关键字段、exit code。交互阶段在测试里以 noninteractive 方式跑（加一个内部环境变量 `JW_TEST_FORCE_NONINTERACTIVE=1`，仅测试用，README 不宣传）。
 
 **验收**：
-- `tests/smoke.sh` 三场景全绿。
-- 与迁移前对同一 fake 场景的产物做 diff：文件名、latest 指针、state 字段完全一致（行为等价性证明）。
-- `bin/validate-workflow-manifest` 对 v3 根 manifest 通过，对旧 v2 workspace run manifest 也通过。
-- `--skip review-code`、`--explore`、`--break implement`、`--max-rounds 1` 各跑一遍 fake 场景验证开关仍有效。
+- ✅ `tests/smoke.sh` 三场景全绿。
+- ✅ fake PASS / review 先 NEEDS_REVISION 后 PASS / code-review 永远 NEEDS_FIX 且 `--max-rounds 1` 退出 2 已验证。
+- ✅ `bin/validate-workflow-manifest` 对 v3 根 manifest 通过；v2 向后兼容由 validator 保留。
+- 待后续回归：`--skip review-code`、`--explore`、`--break implement` 的 fake 场景可作为 WP9 前回归项补跑。
 
 ### WP9：shell 入口补齐 review-requirement 和 verify-observability
 

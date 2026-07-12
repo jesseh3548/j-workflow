@@ -1,0 +1,149 @@
+#!/bin/bash
+set -euo pipefail
+
+SCENARIO="${FAKE_PROVIDER_SCRIPT:-pass}"
+
+prompt=""
+if [[ "$#" -gt 0 && "$1" == "-p" ]]; then
+    prompt="${*: -1}"
+else
+    prompt="$(cat)"
+fi
+
+extract_path() {
+    local label="$1"
+    local line value
+    line="$(printf "%s\n" "$prompt" | grep -F "$label" | head -1 || true)"
+    if [[ -z "$line" ]]; then
+        echo ""
+        return
+    fi
+    value="${line#*${label}}"
+    value="${value#：}"
+    value="${value#:}"
+    value="${value# }"
+    value="${value%%，*}"
+    value="${value%%。*}"
+    value="${value%%；*}"
+    value="${value%%;*}"
+    echo "$value"
+}
+
+write_design() {
+    local file="$1"
+    mkdir -p "$(dirname "$file")"
+    cat > "$file" <<'EOF'
+方案概述
+复用分析
+数据模型
+接口设计
+核心流程
+性能评估
+可观测性方案
+实现指引
+风险和待确认项
+实施评估
+设计决策记录
+交付自检
+EOF
+}
+
+write_brief() {
+    local file="$1"
+    mkdir -p "$(dirname "$file")"
+    cat > "$file" <<'EOF'
+Objective
+Non-goals
+Required Changes
+Contract Changes
+Cross-repo Sync Points
+Edge Cases
+Tests Required
+Review Checklist
+EOF
+}
+
+write_review_plan() {
+    local file="$1"
+    local verdict="PASS"
+    if [[ "$SCENARIO" == "review-needs-revision-then-pass" && "$file" == *review-r1.md ]]; then
+        verdict="NEEDS_REVISION"
+    fi
+    mkdir -p "$(dirname "$file")"
+    printf '审查覆盖与缺口\nVERDICT: %s\n' "$verdict" > "$file"
+}
+
+write_revise() {
+    local file="$1"
+    mkdir -p "$(dirname "$file")"
+    cat > "$file" <<'EOF'
+采纳的评审意见及修正内容
+未采纳的评审意见及理由
+新增的风险项
+implementation-brief.md 的同步更新内容
+EOF
+}
+
+write_implement() {
+    local file="$1"
+    mkdir -p "$(dirname "$file")"
+    cat > "$file" <<'EOF'
+实现概要
+方案符合度自检
+测试覆盖情况
+已知局限
+plan.md / implementation-brief.md 同步情况
+实现决策记录
+EOF
+}
+
+write_review_code() {
+    local file="$1"
+    local verdict="PASS"
+    if [[ "$SCENARIO" == "always-needs-fix" ]]; then
+        verdict="NEEDS_FIX"
+    fi
+    mkdir -p "$(dirname "$file")"
+    printf '审查覆盖与缺口\nPlan/Brief 同步要求\nVERDICT: %s\n' "$verdict" > "$file"
+}
+
+write_fix() {
+    local file="$1"
+    mkdir -p "$(dirname "$file")"
+    cat > "$file" <<'EOF'
+已修复的问题
+未修复的问题
+plan.md 是否同步更新
+implementation-brief.md 是否同步更新
+测试运行结果
+EOF
+}
+
+if [[ "$prompt" == *"方案输出路径："* ]]; then
+    write_design "$(extract_path "方案输出路径")"
+    write_brief "$(extract_path "实现核对索引输出路径")"
+elif [[ "$prompt" == *"调用 /review-plan skill"* ]]; then
+    write_review_plan "$(extract_path "报告输出路径")"
+elif [[ "$prompt" == *"评审报告已出，请根据评审反馈修正"* ]]; then
+    output="$(extract_path "将修正说明写入")"
+    [[ -n "$output" ]] || output="$(extract_path "输出路径")"
+    write_revise "$output"
+    plan_round="$(printf '%s\n' "$prompt" | sed -n 's/.*cp .* \\([^[:space:]]*plan-r[0-9][0-9]*\\.md\\).*/\1/p' | head -1)"
+    [[ -n "$plan_round" ]] && write_design "$plan_round"
+elif [[ "$prompt" == *"调用 /implement skill"* ]]; then
+    write_implement "$(extract_path "输出路径")"
+elif [[ "$prompt" == *"调用 /review-code skill"* ]]; then
+    write_review_code "$(extract_path "报告输出路径")"
+elif [[ "$prompt" == *"代码评审报告已出，请根据评审反馈修复"* ]]; then
+    output="$(extract_path "将修复说明写入")"
+    [[ -n "$output" ]] || output="$(extract_path "输出路径")"
+    write_fix "$output"
+else
+    output="$(extract_path "报告输出路径")"
+    if [[ -n "$output" ]]; then
+        mkdir -p "$(dirname "$output")"
+        printf '审查覆盖与缺口\nVERDICT: PASS\n' > "$output"
+    fi
+fi
+
+exit 0

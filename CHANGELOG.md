@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Replace the shell orchestrator mainline with a manifest-driven generic phase engine, add `tests/fake-provider` plus `tests/smoke.sh`, and cover PASS, revise retry, and max-rounds failure paths for WP8.
 - Add manifest v3 execution metadata for loops, runners, phase breakpoints, run-level `max_rounds`, and persisted breakpoint overrides as the first step toward the generic phase engine in WP8.
 - Extract phase prompts into `prompts/` templates rendered by `bin/render-prompt`, and teach the shell orchestrator and workflow manifest validator to use those templates (WP7 in `docs/plans/refactor-and-manifest-migration.md`).
 - Make `--resume` state-driven: phases skip only when state, output file, and artifact validation all pass; startup artifact validation is warning-only in resume mode, and review/fix loops can continue from the pending revise/fix round (WP6 in `docs/plans/refactor-and-manifest-migration.md`).

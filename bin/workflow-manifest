@@ -100,6 +100,17 @@ def cmd_breakpoint_after(args):
     return 0
 
 
+def cmd_loop_get(args):
+    manifest = load_manifest(args.file)
+    loop = manifest.get("loops", {}).get(args.loop)
+    if not loop:
+        return 1
+    if args.field not in loop:
+        return 1
+    print_value(loop[args.field])
+    return 0
+
+
 def cmd_render_template(args):
     manifest = load_manifest(args.file)
     values = parse_vars(args.var)
@@ -236,6 +247,12 @@ def build_parser():
     p.add_argument("--file", required=True)
     p.add_argument("--phase", required=True)
     p.set_defaults(func=cmd_breakpoint_after)
+
+    p = sub.add_parser("loop-get")
+    p.add_argument("--file", required=True)
+    p.add_argument("--loop", required=True)
+    p.add_argument("--field", required=True)
+    p.set_defaults(func=cmd_loop_get)
 
     p = sub.add_parser("render-template")
     p.add_argument("--file", required=True)
