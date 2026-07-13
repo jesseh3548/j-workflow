@@ -1415,10 +1415,13 @@ run_phase_instance() {
     fi
 
     runner="$(phase_runner "$phase_id")"
+    footer="$runner"
     if [[ "${JW_TEST_FORCE_NONINTERACTIVE-}" == "1" ]]; then
+        if [[ "$runner" == "interactive" ]]; then
+            footer="noninteractive-task"
+        fi
         runner="noninteractive"
     fi
-    footer="$runner"
     [[ "$runner" == "interactive" ]] && footer="interactive"
     prompt="$(render_phase_prompt "$phase_id" "$footer" "$output_file" "$context" "$round" "$phase_name")"
     log_dir="$(phase_dir_for "$phase_id")"

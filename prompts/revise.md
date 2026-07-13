@@ -37,6 +37,9 @@
 - 同步更新 {brief_file}，确保 Required Changes、Contract Changes、Cross-repo Sync Points、Tests Required 与最新 plan-r{round}.md 一致
 - 在 revise-notes 末尾记录一致性验证结论
 
+输出格式硬性要求：
+- revise-notes 必须包含以下精确中文关键词，否则编排器会判定失败：采纳的评审意见及修正内容、未采纳的评审意见及理由、新增的风险项、implementation-brief.md 的同步更新内容
+
 将修正说明写入 {output_file}，包含：
 - 采纳的评审意见及修正内容（标注修改了哪些章节）
 - 未采纳的评审意见及理由

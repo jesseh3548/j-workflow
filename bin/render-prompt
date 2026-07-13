@@ -10,6 +10,7 @@ FOOTER_FILES = {
     "interactive": "_footer-interactive.md",
     "subagent": "_footer-subagent.md",
     "noninteractive": "_footer-noninteractive.md",
+    "noninteractive-task": "_footer-noninteractive-task.md",
     "none": None,
 }
 

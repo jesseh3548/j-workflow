@@ -7,6 +7,10 @@
 - 报告输出路径：{output_file}
 - 评审上下文：{context}
 
+输出格式硬性要求：
+- 报告必须包含精确关键词：审查覆盖与缺口
+- 最后一行必须是 VERDICT: PASS 或 VERDICT: NEEDS_REVISION
+
 额外关注：
 - plan.md 是唯一权威设计与实现依据，implementation-brief.md 只是从 plan 派生的核对索引
 - 必须检查 plan 是否足够让新 implement agent 独立实现，并检查 brief 是否完整覆盖 plan 且没有 plan 外内容

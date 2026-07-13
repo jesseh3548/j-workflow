@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add a `noninteractive-task` prompt footer so forced non-interactive interactive phases can modify project files during real CLI validation while still avoiding workflow-state writes.
+- Harden phase prompt templates with explicit artifact validation keywords so real Codex/Claude outputs satisfy the same contracts enforced by `bin/validate-artifact`.
 - Replace the shell orchestrator mainline with a manifest-driven generic phase engine, add `tests/fake-provider` plus `tests/smoke.sh`, and cover PASS, revise retry, and max-rounds failure paths for WP8.
 - Add manifest v3 execution metadata for loops, runners, phase breakpoints, run-level `max_rounds`, and persisted breakpoint overrides as the first step toward the generic phase engine in WP8.
 - Extract phase prompts into `prompts/` templates rendered by `bin/render-prompt`, and teach the shell orchestrator and workflow manifest validator to use those templates (WP7 in `docs/plans/refactor-and-manifest-migration.md`).

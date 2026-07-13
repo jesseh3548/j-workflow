@@ -7,6 +7,9 @@
 - 输出路径：{output_file}
 - 实现上下文：{context}
 
+输出格式硬性要求：
+- impl-notes.md 必须包含以下精确中文关键词，否则编排器会判定失败：实现概要、方案符合度自检、测试覆盖情况、已知局限、plan.md / implementation-brief.md 同步情况、实现决策记录
+
 执行规则：
 - 先读完整 plan.md，再读 implementation-brief.md
 - plan.md 是唯一权威设计与实现依据；implementation-brief.md 只作为从 plan 派生的核对索引
