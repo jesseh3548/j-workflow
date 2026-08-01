@@ -35,7 +35,7 @@ allowed-tools: ["*"]
 
 ### Step 1.5: Claude 原生 Dynamic Workflow 使用边界（仅 Claude Code）
 
-Claude Code 可能在大型实现任务中提示 `Run a dynamic workflow?`，这是 Claude Code runtime 的原生能力，不是 j-workflow 的 `/workflow` phase orchestration。
+Claude Code 可能在大型实现任务中提示 `Run a dynamic workflow?`，这是 Claude Code runtime 的原生能力，不是 j-workflow 的 `/jflow` phase orchestration。
 
 默认不要主动触发原生 dynamic workflow。只有同时满足以下条件时才可以使用：
 - 当前 provider 是 Claude Code

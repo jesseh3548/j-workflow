@@ -1,15 +1,17 @@
 ---
-name: workflow
+name: jflow
 description: "多 Agent 编排器。根据用户需求，由主 agent 编排子 agent 分析阶段和 Ghostty 交互阶段，完成需求审视→设计→评审→修正→实现→代码评审。"
 argument-hint: "[需求描述或飞书链接]"
 allowed-tools: ["Read", "Write", "Bash", "AskUserQuestion", "Skill", "Glob", "Grep", "Agent"]
 ---
 
-# Workflow — 多 Agent 编排器
+# Jflow — 多 Agent 编排器
 
 你是编排器。你在 Claude Code 或 Codex 主对话中运行，负责准备 workspace、派发阶段任务、检查阶段产物、决定是否推进下一阶段。
 
-仓库根目录的 `workflow.json` 是默认 phase manifest / 模板，记录阶段元数据、产物合同、模型 key、命名模板、verdict transition 和 resume policy。每次运行必须在 workspace 内生成一份同名 `workflow.json` 作为本次 run workflow；它根据用户需求和确认结果写入 `execution.order`，后续编排按 workspace `workflow.json` 推进，`workflow-state.json` 只记录实际运行状态并引用该文件。
+运行时根目录是包含本 `SKILL.md`、`bin/`、`prompts/`、`workflow.json` 的目录；开发态通常是仓库根，生产安装态是打包后的 `jflow/` skill 目录。运行脚本时先定位该 runtime root，并使用其中的 `bin/*`、`prompts/*` 和 `workflow.json`，不要假设当前项目 cwd 自带这些文件。
+
+runtime root 的 `workflow.json` 是默认 phase manifest / 模板，记录阶段元数据、产物合同、模型 key、命名模板、verdict transition 和 resume policy。每次运行必须在 workspace 内生成一份同名 `workflow.json` 作为本次 run workflow；它根据用户需求和确认结果写入 `execution.order`，后续编排按 workspace `workflow.json` 推进，`workflow-state.json` 只记录实际运行状态并引用该文件。
 
 脚本边界：通用能力必须放在脚本库 `bin/` 中，`orchestrate.sh` 只负责编排和调用。manifest 读取用 `bin/workflow-manifest`，manifest 校验用 `bin/validate-workflow-manifest`，state 写入用 `bin/workflow-state`，state 校验用 `bin/validate-workflow-state`，artifact 校验用 `bin/validate-artifact`，provider 非交互执行用 `bin/run-provider-noninteractive`，phase run script 渲染用 `bin/render-phase-run-script`。不要把这些能力重新内联进 `orchestrate.sh`。
 
@@ -22,37 +24,11 @@ allowed-tools: ["Read", "Write", "Bash", "AskUserQuestion", "Skill", "Glob", "Gr
 
 Codex 兼容规则：如果当前 Codex 运行环境没有可用的 Agent tool，不要强行模拟复杂子 agent。主 agent 可以按同一 prompt 在当前 session 直接执行该分析阶段，或使用已验证的非交互 CLI runner；但必须遵守同样的产物、VERDICT、只读/只写报告约束。
 
-术语边界：本项目 `/workflow` skill 是 j-workflow phase orchestration。Claude Code 的 `/workflows` / `Run a dynamic workflow?` 是 Claude Code runtime 的原生 dynamic workflow 能力，两者不是同一个机制。看到 Claude 原生 dynamic workflow 弹窗，不代表 j-workflow 已进入 `.workflow/<name>/` 编排流程。
+术语边界：本项目 `/jflow` skill 是 j-workflow phase orchestration。Claude Code 的 `/workflows` / `Run a dynamic workflow?` 是 Claude Code runtime 的原生 dynamic workflow 能力，两者不是同一个机制。看到 Claude 原生 dynamic workflow 弹窗，不代表 j-workflow 已进入 `.workflow/<name>/` 编排流程。
 
 ## 核心流程
 
-```
-主对话（你 = 编排器）
-  │
-  ├── 1. 理解需求 → 确认参数
-  ├── 2. 准备 workspace
-  │
-  ├── 2.5 派发 review-requirement subagent
-  │     ├── 审视需求合理性（逻辑矛盾、边界模糊、可扩展性、外部知识验证）
-  │     ├── 检查 VERDICT → NEEDS_CLARIFICATION 时暂停等用户澄清
-  │     └── PASS 后继续
-  │
-  ├── 3. 启动 design agent（Ghostty 新 tab）
-  │     ├── Bash run_in_background: 轮询 workflow-state.json
-  │     ├── 用户在 tab 内和 agent 交互
-  │     ├── agent 完成 → 用户确认 → agent 写 workflow-state
-  │     └── 后台任务完成 → 通知回到主对话
-  ├── 4. 问用户：要继续进入评审吗？
-  │
-  ├── 5. 派发 review-plan subagent
-  ├── 6. 检查 VERDICT → 如需修正 → 启动 revise agent
-  │
-  ├── 7. 启动 implement agent
-  ├── 8. 派发 review-code subagent
-  ├── 9. 检查 VERDICT → 如需修复 → 启动 fix agent（循环）
-  ├── 10. 派发 verify-observability subagent
-  └── 11. 汇总产出
-```
+默认顺序来自根 `workflow.json` 的 `execution.default_order`：review-requirement → explore → design → review-plan/revise loop → implement → review-code/fix loop → verify-observability → 汇总。每次运行以 workspace `workflow.json` 的 `execution.order` 为准，跳过项和断点只在生成 run workflow 时落盘。
 
 ## 权威产物同步规则
 
@@ -70,58 +46,11 @@ Codex 兼容规则：如果当前 Codex 运行环境没有可用的 Agent tool�
 - 如果当前阶段没有直接编辑 design 产物的权限或上下文，应停止推进并回到 revise/design 完成同步；不能让最新事实只存在于 fix-notes。
 - 只有纯代码机械修复且不改变任何方案含义、边界、验证口径时，才允许只记录在 fix-notes。
 
-## 版本化产出命名规范
+## 产物命名规范
 
-所有产出文件遵循统一的版本命名规则。**Agent prompt 中会指定具体文件名，必须严格使用指定的名称。**
+产物路径、latest 指针、轮次文件和 updates 均以根 `workflow.json` 为准，运行时必须调用 `bin/validate-workspace-artifacts` 校验。Agent prompt 中指定了输出文件时，必须严格写入该文件。
 
-### 两种版本概念
-
-| 概念 | 格式 | 含义 | 示例 |
-|------|------|------|------|
-| 迭代轮次 | `-rN` 后缀 | 同一阶段内的 review-fix 循环迭代 | `review-r1.md` → `review-r2.md` |
-| 全流程重入 | `archive/round-N/` 目录 | 需求变更导致整个流程重新开始 | `archive/round-1/` |
-
-### 迭代轮次命名（`-rN` 后缀）
-
-迭代从 r1 开始。每次归档（全流程重入）后，迭代计数器**重置为 r1**。
-
-**Design-Review 循环：**
-
-| 轮次 | 评审报告 | 修正说明 | 修正后方案 |
-|------|----------|----------|-----------|
-| 初始 | — | — | `design/plan.md`（原始方案） |
-| r1 | `review/review-r1.md` | `review/revise-notes-r1.md` | `design/plan-r1.md` |
-| r2 | `review/review-r2.md` | `review/revise-notes-r2.md` | `design/plan-r2.md` |
-
-**Code Review-Fix 循环：**
-
-| 轮次 | 评审报告 | 修复说明 |
-|------|----------|----------|
-| r1 | `review-code/code-review-r1.md` | `review-code/fix-notes-r1.md` |
-| r2 | `review-code/code-review-r2.md` | `review-code/fix-notes-r2.md` |
-
-### Latest 指针
-
-每轮结束后，编排器执行 cp 保持 latest 指针更新。`design/plan.md` 是最终唯一权威方案文件，命名必须保持最简单；任何阶段确认的新事实都同步回这个文件。版本化的 `plan-rN.md` 只用于 revise 中间产物和审计，不是下游输入。
-
-| 指针文件 | 更新时机 | 命令 |
-|----------|----------|------|
-| `review/review.md` | review 完成后 | `cp review-rN.md review.md` |
-| `design/plan.md` | revise 完成后 | `cp plan-rN.md plan.md` |
-| `design/plan.md` | fix/manual CR 确认新事实后 | 直接就地更新 `plan.md` 对应章节，不创建新的 plan 命名 |
-| `review-code/code-review.md` | review-code 完成后 | `cp code-review-rN.md code-review.md` |
-
-### 不带版本号的产出
-
-以下文件只有一份，不参与迭代循环：
-
-- `requirement.md` — 需求文档
-- `requirement-review/requirement-review.md` — 需求审视报告
-- `explore/exploration.md` — 探索报告
-- `implement/impl-notes.md` — 实现说明
-- `verify-observability/observability-report.md` — 可观测性验证报告
-
-### 禁止的命名
+`design/plan.md` 是最终唯一权威方案文件；`plan-rN.md` 只用于 revise 中间产物和审计，不是下游输入。
 
 - ❌ `round-1.md`、`round-3-r1.md` — 不要把 round（全流程重入）混入文件名，round 只用于 archive 目录
 - ❌ `plan-part1.md` — 不要用 part 拆分文件，一个阶段一份完整文档
@@ -139,7 +68,7 @@ Codex 兼容规则：如果当前 Codex 运行环境没有可用的 Agent tool�
 - **需求来源** — 飞书链接、本地文件、口述
 - **要跑哪些阶段** — 默认全流程，可跳过部分
 - **Provider** — `claude` 或 `codex`。优先使用用户指定值；未指定时可交给 `orchestrate.sh` 自动推断
-- **模型** — Claude 默认使用 Claude CLI 自身配置的模型；Codex 默认读取 `~/.codex/config.toml`，读不到时使用 gpt-5.5；复杂需求可按 provider 选择更强模型
+- **模型** — 新建 Claude run 在参数确认前必须调用 runtime root 的 `bin/list-claude-models --format json` 实时读取当前 gateway 的 `/v1/models`；Codex 默认读取 `~/.codex/config.toml`，读不到时使用 gpt-5.5；复杂需求可按 provider 选择更强模型
 - **阶段模型覆盖** — 如用户希望设计/评审使用更强模型、实现使用较快模型，支持按阶段覆盖：`model_explore`、`model_design`、`model_review` / `model_review_plan`、`model_revise`、`model_implement`、`model_review_code`、`model_fix`。未指定的阶段继承全局模型。
 
 ### 0.2 获取需求文档
@@ -156,12 +85,19 @@ Codex 兼容规则：如果当前 Codex 运行环境没有可用的 Agent tool�
 
 1. **阶段范围** — 全流程 / 只出方案+评审 / 跳过代码评审
 2. **Provider** — Claude Code / Codex（默认按当前上下文推断）
-3. **模型** — 按 provider 选择。Claude Code 默认使用 CLI 自身配置，也可显式指定 Sonnet / Opus；Codex 可选本机默认模型（读取 `~/.codex/config.toml`）/ 指定模型（如 `gpt-5.5`）
+3. **模型** — 按 provider 选择。Claude Code 必须在本次初始化时调用 `bin/list-claude-models --format json`，按 Opus / Sonnet / Haiku 分组展示实时结果；每个 family 在 gateway 提供足够候选时至少展示两个，版本号倒序，同版本优先 `us.` route。默认优先当前 `ANTHROPIC_MODEL`（前提是它存在于实时目录），否则使用 helper 标记的 `us.` 默认。不得使用 `ANTHROPIC_SMALL_FAST_MODEL` 作为主模型默认值。Codex 可选本机默认模型（读取 `~/.codex/config.toml`）/ 指定模型（如 `gpt-5.5`）
 4. **是否需要需求审视** — 默认开启。需求来源是飞书 PRD 或口述时建议开启；需求已经过充分讨论且边界清晰时可跳过
 5. **是否需要探索阶段** — 仅当需求文档中代码定位不够明确时
 6. **是否需要阶段模型覆盖** — 默认不需要。复杂需求可让 design/review-plan/review-code 使用更强模型，implement/fix 使用默认模型。
 
 可根据上下文省略已明确的选项。
+
+Claude 模型目录规则：
+- 每个新 run 的 Phase 0.3 都重新调用一次 helper，不复用上次结果，不把目录写入仓库、配置或缓存。
+- helper 通过 `ANTHROPIC_BASE_URL` 或 `ANTHROPIC_BEDROCK_BASE_URL` 推导 gateway 根 `/v1/models`，并使用当前 `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_API_KEY` 鉴权。
+- 若实时请求失败，只能把 `ANTHROPIC_MODEL` 作为明确标注的 fallback；不得退回代码内置模型列表，也不得伪造每个 family 的两个候选。
+- 用户选定后只保存模型 ID；phase 执行不再次查询目录。
+- `--resume` 不调用模型目录、不重新提问，必须复用 workspace run `workflow.json` 中已保存的 `provider` 和 `model`。
 
 ### 0.4 准备 workspace
 
@@ -185,36 +121,19 @@ bin/archive-workspace --workspace "<workspace>"
 
 **第二步：创建目录结构并复制需求文档**
 
-```
-<project>/.workflow/<需求名>/
-  ├── workflow.json        # 本次运行计划，从仓库根 workflow.json 生成
-  ├── workflow-state.json  # 本次运行状态
-  ├── requirement.md
-  ├── requirement-review/    # 需求审视
-  ├── explore/
-  ├── design/
-  ├── review/
-  ├── implement/
-  ├── review-code/
-  ├── verify-observability/
-  └── archive/          # 归档目录（按需创建）
-      └── round-N/
-```
-
-用 Bash 创建目录结构，复制需求文档。
+创建 `<project>/.workflow/<需求名>/`，包含 `workflow.json`、`workflow-state.json`、`requirement.md`、各 phase 目录（`requirement-review/`、`explore/`、`design/`、`review/`、`implement/`、`review-code/`、`verify-observability/`）和按需创建的 `archive/round-N/`。
 
 **第三步：生成本次 run workflow**
 
-从仓库根 `workflow.json` 读取默认 phase manifest，根据用户确认的阶段范围、provider、模型和跳过项，生成 `<workspace>/workflow.json`。不要直接修改仓库根 `workflow.json`。
+从仓库根 `workflow.json` 读取默认 phase manifest，根据用户确认的阶段范围、provider、模型和跳过项，生成 `<workspace>/workflow.json`。Claude 使用 Phase 0.3 用户最终选中的完整模型 ID，不保存本次 gateway 目录。不要直接修改仓库根 `workflow.json`。
 
-本次 run workflow 必须包含：
-- `kind: "run"`
-- `source_manifest` 指向仓库根 `workflow.json`
-- `task_name`、`provider`、`model`
-- `execution.order`：本次实际执行顺序，例如完整流程包含 review-requirement、design、review-plan、revise、implement、review-code、fix、verify-observability；bugfix flow 可只包含 implement、review-code、fix
-- `execution.disabled`：未进入本次 run 的 phase
+本次 run workflow 必须包含 `kind: "run"`、`source_manifest`、`task_name`、`provider`、`model`、`execution.order` 和 `execution.disabled`。
+
+续跑时以 workspace run workflow 中的 `provider` 和 `model` 为准；忽略重新推断出的 provider 默认模型，也不要用当前环境中新出现的模型替换已保存选择。
 
 初始化 `workflow-state.json` 后，必须将 `metadata.flow_file` 指向 `<workspace>/workflow.json`。需求中途变更时，旧的 workspace `workflow.json` 和 `workflow-state.json` 必须一起归档，再基于新需求生成新的 workspace `workflow.json` 和 state。
+
+初始化 state 时还要调用 `bin/detect-main-agent-session` 识别当前主编排 agent。Claude Code 使用 `CLAUDE_CODE_SESSION_ID`，Codex 使用 `CODEX_THREAD_ID`；识别成功后通过 `bin/workflow-state set-main-agent` 写入顶层 `main_agent.provider`、`main_agent.session_id` 和 `main_agent.recorded_at`。主 agent provider 与 phase provider 是两个独立概念，不能用 run workflow 的 `provider` 代替。无法唯一识别时不猜测、不写错误 UUID，并明确提示。
 
 **第四步：检查 CLAUDE.md**
 
@@ -226,13 +145,13 @@ bin/archive-workspace --workspace "<workspace>"
 
 原因：从 Claude Code / Codex 的 Bash tool 或后台子进程调用时，stdout 通常不是 tty，不能依赖 OSC title marker 定位当前 tab。必须在准备阶段取一次 Ghostty frontmost window id，然后通过 `bin/ghostty-open-tab --window-id` 显式传入。
 
-输入法注意：`ghostty-open-tab` 会在创建新 tab 前先把 macOS 输入源切到 ABC，避免中文输入法把启动命令中的 `bash` 等字符转换成中文。不要通过 keystroke/粘贴方式向 Ghostty 输入启动命令；必须使用 helper 的 `command of cfg` 方式启动 run script。helper 会生成一个无空格路径的临时 launcher，并将 `command of cfg` 指向该 launcher，再由 launcher `exec` 真正的 run script，避免 Ghostty 对 `bash <script>` 参数拆分和中文输入法干扰。run script 内部的输入法切换只作为 agent 交互阶段的兜底，不负责启动命令阶段。
+输入法注意：`ghostty-open-tab` 会在创建新 tab 前切到 ABC，并通过 Ghostty `command of cfg` 启动一个无空格路径的临时 launcher，再由 launcher `exec` run script。不要用 keystroke/粘贴方式向 Ghostty 输入启动命令。
 
-执行边界：
-- helper 目录解析、provider CLI 解析、Ghostty window id 检测、run script 渲染都由 `bin/` 脚本或 `orchestrate.sh` 的薄封装完成。
-- Ghostty window id 检测使用 `bin/detect-ghostty-window`；结果写入 workflow state metadata。
-- provider CLI 必须解析成绝对路径；如 CLI 不在常见路径中，用户可通过 `CLAUDE_BIN` 或 `CODEX_BIN` 指定。
-- `/workflow` skill 不维护 AppleScript 或 provider 命令细节；这些实现细节属于 `bin/ghostty-open-tab`、`bin/render-phase-run-script` 和 `bin/run-provider-noninteractive`。
+认证环境注意：Ghostty 通过 `command of cfg` 启动时不会加载用户的 `.zshrc` / `.bashrc`。不要手写裸 `claude` / `codex` Ghostty command 来启动 phase；否则容易丢失 `.zshrc` 中的 `ANTHROPIC_*` / `CLAUDE_CODE_*` 等鉴权变量。必须先用 `bin/render-phase-run-script` 渲染 run script，由 run script 显式 export 当前主进程中已有的 provider 鉴权环境，再交给 `bin/ghostty-open-tab` 启动。
+
+环境变量边界：`ghostty-open-tab` 只负责打开 tab 和执行 run script，不得注入 provider 专属环境变量。尤其不要在 Ghostty launcher 层全局设置 `NODE_TLS_REJECT_UNAUTHORIZED=0`；该变量只允许由 provider 命令渲染脚本按 provider 条件处理，避免污染 Claude 启动环境。
+
+执行边界：helper 目录解析、provider CLI 解析、Ghostty window id 检测、run script 渲染都由 `bin/` 脚本或 `orchestrate.sh` 薄封装完成。CLI 必须解析成绝对路径；如不在常见路径中，用户可用 `CLAUDE_BIN` 或 `CODEX_BIN` 指定。`/jflow` 不维护 AppleScript 或 provider 命令细节。
 
 ## Phase 执行机制
 
@@ -270,23 +189,7 @@ bin/validate-workspace-artifacts --manifest <workflow.json> --workspace <workspa
 
 Subagent phase 不生成 run script，不打开 Ghostty tab，不写完成 marker。主 agent 直接用 Agent tool 派发独立子 agent。
 
-Subagent prompt 必须包含：
-
-```text
-调用 /<skill> skill。
-
-上下文参数：
-...
-
-执行模式：Subagent phase。
-- 你是由 /workflow 主 agent 派发的独立分析子 agent。
-- 直接完成任务并写入指定输出文件：<output_file>
-- 不要等待用户确认，不要写 marker 文件。
-- 不要修改业务代码；除指定报告/验证产物外不要写其他文件。
-- 如需要读取代码，优先使用结构化索引、diff hunk、符号定位和小范围窗口读取，避免无边界全文件读取。
-- 报告最后一行必须写 VERDICT，取值按对应 skill 要求。
-- 完成后直接返回，简要说明产出文件路径。
-```
+Subagent prompt 必须说明：调用对应 skill、执行模式为 Subagent phase、只写指定输出文件、不等待用户确认、不写 marker、不修改业务代码、优先用结构化索引/diff hunk/小窗口读取、最后一行写合法 `VERDICT`、完成后直接返回产出路径。
 
 主 agent 在子 agent 返回后必须：
 
@@ -306,15 +209,7 @@ Codex fallback：如果没有 Agent tool，按以下顺序选择执行方式：
 
 ### Step 1B: Interactive phase prompt 完成状态
 
-Interactive phase 在 prompt 末尾追加完成状态指令：
-
-```
-重要：当你完成上述所有任务后，请告知用户你已完成，并列出你的产出文件路径，请用户审阅。
-如果在与用户交流过程中，最终结论、边界、取舍、风险说明或修正内容发生变化，必须先把变化回写到当前阶段的输出文件对应章节，再结束对话；不要只在聊天里确认而不落盘。
-当用户确认可以继续后（例如回复"ok"、"继续"、"下一步"等），运行以下 bash 命令写入阶段完成状态：
-bin/workflow-state phase-finish --file "<workspace>/workflow-state.json" --phase "<phase_name>" --status done --exit-code 0 --output-file "<output_file>"
-这个状态用于通知编排器推进到下一阶段。在用户明确确认之前，不要写入完成状态。
-```
+Interactive phase 在 prompt 末尾追加完成状态指令：完成后列出产物路径请用户审阅；如交流改变了结论、边界、取舍、风险或修正内容，先回写当前阶段输出文件；用户明确确认后才运行 `bin/workflow-state phase-finish-active --file "<workspace>/workflow-state.json" --status done --exit-code 0 --output-file "<output_file>"`。该命令从 state 的 `current_phase` 取得 canonical instance key，agent 不得自行传 phase 名称。
 
 ### Step 2: 生成 run script
 
@@ -325,11 +220,12 @@ bin/workflow-state phase-finish --file "<workspace>/workflow-state.json" --phase
 - 切换到 `{project_dir}`
 - 写入 `<workspace>/<phase>/<phase>.started`
 - 输出 provider/model/project/session 信息
+- 显式 export 当前主进程中的 provider 鉴权环境，不能依赖 Ghostty 加载 shell rc 文件
 - 根据 provider 启动 agent CLI
 - 如果 agent 退出但 phase 状态仍是 `running`，用 exit code 兜底写 `workflow-state.json`
 - 写入后必须具备可执行权限，因为 `ghostty-open-tab` 的临时 launcher 会直接 `exec` run script，而不是通过 `bash <run_script>` 间接执行。
 
-provider 命令细节由 `bin/render-phase-run-script` 负责。`<provider_cli>` 必须是 Phase 0.4 中解析到的绝对路径，不要在 run script 中直接写 `claude` 或 `codex`。
+provider 命令细节由 `bin/render-phase-run-script` 负责。`<provider_cli>` 必须是 Phase 0.4 中解析到的绝对路径，不要在 run script 中直接写 `claude` 或 `codex`。Claude 分支不得额外注入 `NODE_TLS_REJECT_UNAUTHORIZED=0`；Codex 如需该变量，由 renderer 在 Codex 分支单独处理。
 
 ### Step 3: 开 Ghostty tab
 
@@ -351,7 +247,7 @@ open_phase_tab "<run_script_path>" "<project_dir>" "<started_marker>"
 while [ "$(bin/workflow-state get-phase-status --file "<workspace>/workflow-state.json" --phase "<phase_name>")" = "running" ]; do
   sleep 5
   # 每约 5 分钟提示:
-  # bin/workflow-state phase-finish --file "<workspace>/workflow-state.json" --phase "<phase_name>" --status done --exit-code 0 --output-file "<output_file>"
+  # bin/workflow-state phase-finish-active --file "<workspace>/workflow-state.json" --status done --exit-code 0 --output-file "<output_file>"
 done
 echo "PHASE_COMPLETE:<phase_name>"
 ```
@@ -369,20 +265,7 @@ Subagent phase 在子 agent 返回并通过产物检查后进入阶段间确认�
 
 ### Step 6: 产出质量轻量校验
 
-阶段完成后，不只检查文件是否存在，还要做最小内容校验。校验失败时不要推进下一阶段，先让对应阶段 agent 修正产物。
-
-| Artifact | 必须校验 |
-|----------|----------|
-| `requirement-review/requirement-review.md` | 最后一行包含合法 `VERDICT: PASS` 或 `VERDICT: NEEDS_CLARIFICATION` |
-| `design/plan.md` | 包含方案概述、复用分析、数据模型、接口设计、核心流程、性能评估、可观测性方案、实现指引、风险和待确认项、实施评估、设计决策记录、交付自检 |
-| `design/implementation-brief.md` | 文件存在；包含 Required Changes、Contract Changes、Cross-repo Sync Points、Tests Required；所有条目应可回链到 plan section |
-| `review/review-rN.md` | 包含评审详情和最后一行合法 `VERDICT: PASS` 或 `VERDICT: NEEDS_REVISION` |
-| `implement/impl-notes.md` | 包含实现概要、方案符合度自检、测试覆盖情况、已知局限、plan.md / implementation-brief.md 同步情况、实现决策记录 |
-| `review-code/code-review-rN.md` | 包含审查覆盖与缺口、Plan/Brief 同步要求，并在最后一行写合法 `VERDICT: PASS` 或 `VERDICT: NEEDS_FIX` |
-| `review-code/fix-notes-rN.md` | 包含已修复、未修复及理由、plan.md 是否同步更新、implementation-brief.md 是否同步更新、测试运行结果 |
-| `verify-observability/observability-report.md` | 包含静态验证结果、运行时验证结果或跳过原因，并有合法 VERDICT |
-
-这是轻量校验，不替代 review-plan/review-code 的深度评审；它只防止空文件、漏章节、漏 VERDICT 之类的产物质量问题进入下一阶段。
+阶段完成后，不只检查文件是否存在，还要按 `workflow.json` 的 `artifact_check` 调用 `bin/validate-artifact`，再调用 `bin/validate-workspace-artifacts`。校验失败时不要推进下一阶段，先让对应阶段 agent 修正产物。
 
 ## Prompt 模板与上下文
 
@@ -416,30 +299,9 @@ context 拼接规则：
 - `review-code` 完成后复制 `code-review-rN.md` 到 `code-review.md`。
 - 所有阶段完成后运行 artifact 校验；失败时不推进下一阶段。
 
-## Code Review-Fix 循环
+## Review/Fix 循环
 
-代码评审完成后，编排器（你）需要：
-
-1. 读取 code-review-rN.md，检查最后一行是否包含 `VERDICT: PASS` 或 `VERDICT: NEEDS_FIX`
-2. 执行 `cp code-review-rN.md code-review.md`（保持 code-review.md 始终指向最新版）
-3. 如果 PASS → 先确认 `design/plan.md` 和 `design/implementation-brief.md` 已包含 review/fix/manual CR 后的最终事实，再进入可观测性验证（Phase 5.2）
-4. 如果 NEEDS_FIX → 告知用户评审发现问题，问是否进入修复
-5. 修复完成后重新进入代码评审，循环直到 PASS
-
-文件命名见「版本化产出命名规范」节。
-
-## Design Review-Revise 循环
-
-方案评审完成后，编排器（你）需要：
-
-1. 读取 review-rN.md，检查最后一行是否包含 `VERDICT: PASS` 或 `VERDICT: NEEDS_REVISION`
-2. 执行 `cp review-rN.md review.md`（保持 review.md 始终指向最新版）
-3. 如果 PASS → 告知用户，问是否进入实现
-4. 如果 NEEDS_REVISION → 告知用户评审发现问题，问是否进入修正
-5. 修正完成后执行 `cp plan-rN.md plan.md`（保持 plan.md 始终指向最新版）
-6. 重新进入评审，循环直到 PASS
-
-文件命名见「版本化产出命名规范」节。
+循环、transition、latest 指针和 updates 由 `workflow.json` 的 `loops`、phase `transitions`、`latest`、`updates` 定义。编排器负责执行 verdict 分支、复制 latest 指针，并在 review/fix/manual CR 改变事实时同步回 `design/plan.md` 和必要的 `design/implementation-brief.md`。
 
 ## 流程重入（需求变更）
 
@@ -458,4 +320,3 @@ context 拼接规则：
 - **Ghostty 必须**：此编排器依赖 Ghostty 1.3.0+ AppleScript API，其他终端不支持
 - **项目约束检查**：启动前检查项目目录有无 `CLAUDE.md`/`AGENTS.md` 等 agent 指南，没有则警告
 - **TRD 生成**：全流程完成后，提醒用户可用 `/write-trd` 将 plan.md 转为 TRD 文档
-- **Shell 入口差异**：当前 `orchestrate.sh` 暂未接入 `review-requirement` 和 `verify-observability`，本次不补；`/workflow` skill 仍保留完整 phase 定义。

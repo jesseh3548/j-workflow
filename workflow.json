@@ -15,10 +15,9 @@
     "notes": "Interactive revise resumes design; fix resumes implement. The shell orchestrator reads stored session_id from workflow-state.json. If missing, Claude may fall back to session name; Codex fails because resume is not reliable without session_id."
   },
   "execution": {
-    "skill_order": ["review-requirement", "explore", "design", "review-plan", "revise", "implement", "review-code", "fix", "verify-observability"],
-    "shell_order": ["explore", "design", "review-plan", "revise", "implement", "review-code", "fix"],
-    "shell_excluded": ["review-requirement", "verify-observability"],
-    "notes": "The skill-level flow defines all phases. The shell entry intentionally excludes review-requirement and verify-observability until they are explicitly added."
+    "default_order": ["review-requirement", "explore", "design", "review-plan", "revise", "implement", "review-code", "fix", "verify-observability"],
+    "phase_timeout_minutes": 0,
+    "notes": "The default order is shared by the jflow skill and shell orchestrator. Per-run workflow.json may disable phases based on CLI/config flags."
   },
   "loops": {
     "design-review": {

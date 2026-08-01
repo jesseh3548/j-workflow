@@ -43,7 +43,13 @@ def ordered_unique(values):
 
 def build_order(manifest, args):
     execution = manifest.get("execution", {})
-    base_order = execution.get(f"{args.mode}_order") or execution.get("order") or execution.get("skill_order") or phase_ids(manifest)
+    base_order = (
+        execution.get(f"{args.mode}_order")
+        or execution.get("default_order")
+        or execution.get("order")
+        or execution.get("skill_order")
+        or phase_ids(manifest)
+    )
     disabled = set(args.disable or [])
     enabled = set(args.enable or [])
 
@@ -86,6 +92,7 @@ def main():
     parser.add_argument("--provider", required=True)
     parser.add_argument("--model", required=True)
     parser.add_argument("--max-rounds", type=int, default=3)
+    parser.add_argument("--phase-timeout-minutes", type=int, default=0)
     parser.add_argument("--break", dest="break_phase", action="append", default=[])
     parser.add_argument("--no-break", dest="no_break_phase", action="append", default=[])
     parser.add_argument("--enable", action="append", default=[])
@@ -93,6 +100,8 @@ def main():
     args = parser.parse_args()
     if args.max_rounds < 0:
         raise ValueError("--max-rounds must be a non-negative integer")
+    if args.phase_timeout_minutes < 0:
+        raise ValueError("--phase-timeout-minutes must be a non-negative integer")
 
     template_path = os.path.abspath(args.template)
     manifest = load_json(template_path)
@@ -108,6 +117,7 @@ def main():
     run.setdefault("execution", {})["order"] = order
     run["execution"]["mode"] = args.mode
     run["execution"]["max_rounds"] = args.max_rounds
+    run["execution"]["phase_timeout_minutes"] = args.phase_timeout_minutes
     run["execution"]["breakpoints"] = build_breakpoints(run, args)
     run["execution"]["disabled"] = [phase_id for phase_id in phase_ids(run) if phase_id not in set(order)]
 

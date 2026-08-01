@@ -17,36 +17,39 @@ project_dir: ~/code/your-project
 # Agent provider（可选，默认自动推断；支持 claude 或 codex）
 # provider: claude
 
-# Agent 模型（可选，需与 provider 匹配；Claude 未指定时使用 CLI 自身配置）
-# Claude Code 示例（仅示例，可按本机可用模型替换）：
-# model: claude-sonnet-4-6
+# Agent 模型（可选，需与 provider 匹配）
+# /jflow 初始化 Claude run 时会实时读取 gateway /v1/models，再把本次选择写入 run workflow；这里不要维护模型枚举。
+# 直接运行 orchestrate.sh 且未指定 Claude model 时，仍使用 CLI 自身配置。
+# model: <从本次实时目录选择的完整 Claude 模型 ID>
 # Codex 示例：
 # provider: codex
 # model: gpt-5.5
 #
 # 阶段模型覆盖（可选，未指定则继承 model）
-# model_explore: claude-sonnet-4-6
-# model_design: claude-opus-4-6
-# model_review_plan: claude-opus-4-6
-# model_revise: claude-opus-4-6
-# model_implement: claude-sonnet-4-6
-# model_review_code: claude-opus-4-6
-# model_fix: claude-sonnet-4-6
+# model_explore: <Claude model ID>
+# model_design: <Claude model ID>
+# model_review_plan: <Claude model ID>
+# model_revise: <Claude model ID>
+# model_implement: <Claude model ID>
+# model_review_code: <Claude model ID>
+# model_fix: <Claude model ID>
 
 # Review/Fix 循环最大轮数（可选，默认 3；CLI --max-rounds 会覆盖）
 # max_rounds: 3
 
-# 交互阶段最长等待分钟数（可选，默认 0 = 不超时；CLI --phase-timeout 会覆盖）
+# 单阶段最长运行/等待分钟数（可选，默认 0 = 不超时；CLI --phase-timeout 会覆盖）
 # phase_timeout: 0
 
 # ── 阶段开关 ──
 # true = 启用, false = 跳过
 
+review_requirement: true  # 需求审视；无 requirement 文件时 shell 入口会自动跳过
 explore: false        # 需求探索（研发主导需求时开启）
 design: true          # 方案设计
 review_plan: true     # 方案评审
 implement: true       # TDD 实现
 review_code: true     # 代码评审
+verify_observability: true # 可观测性验证；跳过 review_code 时会自动跳过
 
 # ── 断点配置 ──
 # true = 该阶段后暂停等待确认, false = 自动继续

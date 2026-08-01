@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 import argparse
 import os
+import signal
 import subprocess
+import sys
+import time
 
 
 def read_text(path):
@@ -16,12 +19,11 @@ def build_command(args):
             "-p",
             "--output-format",
             "text",
-            "--add-dir",
-            args.project_dir,
-            "--add-dir",
-            args.workspace_dir,
             "--permission-mode",
             "acceptEdits",
+            "--add-dir",
+            args.workspace_dir,
+            "--",
             read_text(args.prompt_file),
         ]
         if args.model:
@@ -49,10 +51,10 @@ def build_command(args):
     raise ValueError(f"Unsupported provider: {args.provider}")
 
 
-def build_env():
+def build_env(provider):
     env = os.environ.copy()
-    env["NODE_TLS_REJECT_UNAUTHORIZED"] = "0"
-    env["PATH"] = f"/opt/homebrew/bin:/usr/local/bin:{env.get('HOME', '')}/.local/bin:{env.get('PATH', '')}"
+    if provider == "codex":
+        env["NODE_TLS_REJECT_UNAUTHORIZED"] = "0"
     return env
 
 
@@ -65,24 +67,84 @@ def build_parser():
     parser.add_argument("--workspace-dir", required=True)
     parser.add_argument("--prompt-file", required=True)
     parser.add_argument("--log-file", required=True)
+    parser.add_argument(
+        "--timeout-seconds",
+        type=int,
+        default=0,
+        help="Terminate the provider after this many seconds. Zero disables the timeout.",
+    )
     return parser
+
+
+def terminate_process_group(process, grace_seconds=5):
+    if process.poll() is not None:
+        return
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    deadline = time.monotonic() + grace_seconds
+    while process.poll() is None and time.monotonic() < deadline:
+        time.sleep(0.05)
+    if process.poll() is None:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+
+def run_provider(args, command, stdin_text, log):
+    stdin = subprocess.PIPE if stdin_text is not None else subprocess.DEVNULL
+    process = subprocess.Popen(
+        command,
+        stdin=stdin,
+        stdout=log,
+        stderr=subprocess.STDOUT,
+        text=True,
+        cwd=args.project_dir,
+        env=build_env(args.provider),
+        start_new_session=True,
+    )
+    previous_handlers = {}
+
+    def handle_signal(signum, _frame):
+        terminate_process_group(process)
+        raise SystemExit(128 + signum)
+
+    for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        previous_handlers[signum] = signal.signal(signum, handle_signal)
+
+    try:
+        try:
+            process.communicate(
+                input=stdin_text,
+                timeout=args.timeout_seconds if args.timeout_seconds > 0 else None,
+            )
+        except subprocess.TimeoutExpired:
+            terminate_process_group(process)
+            log.write(
+                f"\n[ERROR] provider timed out after {args.timeout_seconds} seconds\n"
+            )
+            log.flush()
+            return 124
+        return process.returncode
+    finally:
+        for signum, handler in previous_handlers.items():
+            signal.signal(signum, handler)
 
 
 def main():
     args = build_parser().parse_args()
+    if args.timeout_seconds < 0:
+        print("[ERROR] --timeout-seconds must be non-negative", file=sys.stderr)
+        return 2
+    if not os.path.isdir(args.project_dir):
+        print(f"[ERROR] project directory not found: {args.project_dir}", file=sys.stderr)
+        return 2
     command, stdin_text = build_command(args)
     os.makedirs(os.path.dirname(os.path.abspath(args.log_file)), exist_ok=True)
     with open(args.log_file, "w", encoding="utf-8") as log:
-        result = subprocess.run(
-            command,
-            input=stdin_text,
-            text=True,
-            stdout=log,
-            stderr=subprocess.STDOUT,
-            env=build_env(),
-            check=False,
-        )
-    return result.returncode
+        return run_provider(args, command, stdin_text, log)
 
 
 if __name__ == "__main__":

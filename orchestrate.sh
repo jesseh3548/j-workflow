@@ -73,6 +73,9 @@ RESUME_MODE=false
 GHOSTTY_WINDOW_ID=""
 MAX_ROUNDS=3
 PHASE_TIMEOUT_MINUTES=0
+ACTIVE_PHASE_NAME=""
+ACTIVE_PHASE_OUTPUT=""
+ACTIVE_PROVIDER_PID=""
 
 # Phase breakpoints (default: semi-auto)
 BP_AFTER_EXPLORE=false
@@ -82,11 +85,13 @@ BP_AFTER_IMPLEMENT=false
 BP_AFTER_REVIEW_CODE=true
 
 # Phase toggles (default: all enabled)
+PHASE_REVIEW_REQUIREMENT=true
 PHASE_EXPLORE=false  # off by default, enable with --explore
 PHASE_DESIGN=true
 PHASE_REVIEW_PLAN=true
 PHASE_IMPLEMENT=true
 PHASE_REVIEW_CODE=true
+PHASE_VERIFY_OBSERVABILITY=true
 
 # ============================================================
 # Helper functions
@@ -231,7 +236,7 @@ detect_provider() {
                 fi
                 return 0
                 ;;
-            *) log_error "未知 provider: $PROVIDER（仅支持 claude/codex）"; exit 1 ;;
+            *) log_error "未知 provider: ${PROVIDER}（仅支持 claude/codex）"; exit 1 ;;
         esac
     fi
 
@@ -335,6 +340,66 @@ get_workflow_meta() {
     state_cmd get-workflow-meta --file "$STATE_FILE" --key "$1" 2>/dev/null || true
 }
 
+record_main_agent_session() {
+    local detected=""
+    detected="$("$BIN_DIR/detect-main-agent-session" 2>/dev/null || true)"
+    if [[ -z "$detected" ]]; then
+        log_info "未识别到当前主 agent UUID，不写入 workflow state"
+        return 0
+    fi
+
+    local main_provider=""
+    local main_session_id=""
+    IFS=$'\t' read -r main_provider main_session_id <<< "$detected"
+    if [[ -z "$main_provider" || -z "$main_session_id" ]]; then
+        log_warn "主 agent session 检测结果无效，不写入 workflow state"
+        return 0
+    fi
+
+    state_cmd set-main-agent \
+        --file "$STATE_FILE" \
+        --provider "$main_provider" \
+        --session-id "$main_session_id"
+    log_info "记录主 agent UUID: $main_provider → $main_session_id"
+}
+
+log_resume_summary() {
+    [[ "$RESUME_MODE" != true ]] && return 0
+
+    local current_phase last_finished current_loop current_round artifact_status artifact_checked loop_exhausted
+    local main_agent_provider main_agent_session_id
+    main_agent_provider="$(state_cmd get-main-agent-provider --file "$STATE_FILE" 2>/dev/null || true)"
+    main_agent_session_id="$(state_cmd get-main-agent-session-id --file "$STATE_FILE" 2>/dev/null || true)"
+    current_phase="$(get_workflow_meta current_phase)"
+    last_finished="$(get_workflow_meta last_finished_phase)"
+    current_loop="$(get_workflow_meta current_loop)"
+    current_round="$(get_workflow_meta current_round)"
+    artifact_status="$(get_workflow_meta artifact_validation_status)"
+    artifact_checked="$(get_workflow_meta last_artifact_validation)"
+    loop_exhausted="$(get_workflow_meta loop_exhausted)"
+
+    echo ""
+    echo -e "${CYAN}[RESUME]${NC} workflow-state 摘要"
+    echo "  main_agent: ${main_agent_provider:-<none>}/${main_agent_session_id:-<none>}"
+    echo "  current_phase: ${current_phase:-<none>}"
+    echo "  last_finished_phase: ${last_finished:-<none>}"
+    echo "  current_loop/current_round: ${current_loop:-<none>}/${current_round:-<none>}"
+    echo "  artifact_validation_status: ${artifact_status:-unknown}${artifact_checked:+ at $artifact_checked}"
+    if [[ -n "$loop_exhausted" ]]; then
+        echo "  loop_exhausted: $loop_exhausted"
+    fi
+    if [[ -n "$current_phase" ]]; then
+        local status exit_code output_file
+        status="$(state_cmd get-phase-status --file "$STATE_FILE" --phase "$current_phase" 2>/dev/null || true)"
+        exit_code="$(state_cmd get-phase-field --file "$STATE_FILE" --phase "$current_phase" --key exit_code 2>/dev/null || true)"
+        output_file="$(state_cmd get-phase-field --file "$STATE_FILE" --phase "$current_phase" --key output_file 2>/dev/null || true)"
+        echo "  current_phase_status: ${status:-missing}${exit_code:+ exit=$exit_code}"
+        if [[ -n "$output_file" ]]; then
+            echo "  current_phase_output: $output_file"
+        fi
+    fi
+}
+
 validate_workspace_artifacts() {
     if [[ -z "${FLOW_FILE:-}" || ! -f "${FLOW_FILE:-}" ]]; then
         return 0
@@ -365,6 +430,125 @@ validate_phase_artifact() {
     else
         "$BIN_DIR/validate-artifact" --kind "$artifact_kind" --file "$file" --verdicts "$verdicts"
     fi
+}
+
+provider_timeout_seconds() {
+    if [[ "${JW_TEST_PHASE_TIMEOUT_SECONDS:-}" =~ ^[0-9]+$ ]]; then
+        echo "$JW_TEST_PHASE_TIMEOUT_SECONDS"
+    else
+        echo $((PHASE_TIMEOUT_MINUTES * 60))
+    fi
+}
+
+run_provider_noninteractive() {
+    local phase_model="$1"
+    local prompt_file="$2"
+    local log_file="$3"
+    local timeout_seconds
+    timeout_seconds="$(provider_timeout_seconds)"
+
+    "$BIN_DIR/run-provider-noninteractive" \
+        --provider "$PROVIDER" \
+        --provider-cli "$PROVIDER_CLI" \
+        --model "$phase_model" \
+        --project-dir "$PROJECT_DIR" \
+        --workspace-dir "$WORKSPACE_DIR" \
+        --prompt-file "$prompt_file" \
+        --log-file "$log_file" \
+        --timeout-seconds "$timeout_seconds" &
+    ACTIVE_PROVIDER_PID="$!"
+    wait "$ACTIVE_PROVIDER_PID"
+    local exit_code="$?"
+    ACTIVE_PROVIDER_PID=""
+    return "$exit_code"
+}
+
+handle_active_phase_signal() {
+    local exit_code="$1"
+    trap - INT TERM HUP
+    if [[ -n "${ACTIVE_PROVIDER_PID:-}" ]]; then
+        kill -TERM "$ACTIVE_PROVIDER_PID" 2>/dev/null || true
+        wait "$ACTIVE_PROVIDER_PID" 2>/dev/null || true
+        ACTIVE_PROVIDER_PID=""
+    fi
+    local phase_name="${ACTIVE_PHASE_NAME:-}"
+    local output_file="${ACTIVE_PHASE_OUTPUT:-}"
+    if [[ -z "$phase_name" && -n "${STATE_FILE:-}" && -f "${STATE_FILE:-}" ]]; then
+        phase_name="$(state_cmd get-workflow-meta --file "$STATE_FILE" --key current_phase 2>/dev/null || true)"
+        if [[ -n "$phase_name" ]]; then
+            output_file="$(state_cmd get-phase-field --file "$STATE_FILE" --phase "$phase_name" --key output_file 2>/dev/null || true)"
+        fi
+    fi
+    if [[ -n "$phase_name" && -n "${STATE_FILE:-}" && -f "${STATE_FILE:-}" ]]; then
+        state_cmd phase-finish \
+            --file "$STATE_FILE" \
+            --phase "$phase_name" \
+            --status failed \
+            --exit-code "$exit_code" \
+            --output-file "$output_file" \
+            >/dev/null 2>&1 || true
+        log_error "$phase_name 被信号中断，已标记 failed，exit=$exit_code"
+    fi
+    exit "$exit_code"
+}
+
+ensure_phase_artifact() {
+    local phase_name="$1"
+    local phase_id="$2"
+    local output_file="$3"
+    local log_dir="$4"
+    local phase_model="$5"
+    local validation_error
+    local previous_phase="${ACTIVE_PHASE_NAME:-}"
+    local previous_output="${ACTIVE_PHASE_OUTPUT:-}"
+
+    if validation_error="$(validate_phase_artifact "$phase_id" "$output_file" 2>&1)"; then
+        return 0
+    fi
+
+    local contract="{}"
+    if [[ -n "${FLOW_FILE:-}" && -f "${FLOW_FILE:-}" ]]; then
+        contract="$("$BIN_DIR/workflow-manifest" phase-get \
+            --file "$FLOW_FILE" \
+            --phase "$phase_id" \
+            --field artifact_check 2>/dev/null || echo '{}')"
+    fi
+
+    local repair_prompt="${log_dir}/${phase_name}.artifact-repair.prompt"
+    local repair_log="${log_dir}/${phase_name}.artifact-repair.log"
+    cat > "$repair_prompt" <<EOF
+当前阶段产物已生成，但未通过机器格式校验。请只修订下面这个产物文件，不要修改业务代码、测试、workflow-state.json、workflow.json 或其他阶段产物。
+
+- 阶段 ID：$phase_id
+- 产物路径：$output_file
+- 校验错误：
+$validation_error
+- 完整产物契约（required_keywords 必须逐字出现；如有 verdicts，最后一个非空行必须是合法的 VERDICT）：
+$contract
+
+请先读取现有产物，保留其中有价值的实质内容，再补齐精确标题和合法 verdict。完成后直接退出，不要等待用户确认。
+EOF
+
+    log_warn "$phase_name 产物格式校验失败，启动一次只修订产物的自动纠正"
+    ACTIVE_PHASE_NAME="$phase_name"
+    ACTIVE_PHASE_OUTPUT="$output_file"
+    set +e
+    run_provider_noninteractive "$phase_model" "$repair_prompt" "$repair_log"
+    local repair_exit="$?"
+    set -e
+    ACTIVE_PHASE_NAME="$previous_phase"
+    ACTIVE_PHASE_OUTPUT="$previous_output"
+    rm -f "$repair_prompt"
+
+    if [[ "$repair_exit" != "0" ]]; then
+        log_error "$phase_name 产物自动纠正失败，exit=$repair_exit，日志: $repair_log"
+        return 1
+    fi
+    if ! validate_phase_artifact "$phase_id" "$output_file"; then
+        log_error "$phase_name 自动纠正后仍未通过产物校验: $output_file"
+        return 1
+    fi
+    log_success "$phase_name 产物格式已自动纠正"
 }
 
 render_phase_template() {
@@ -402,8 +586,8 @@ phase_dir_for() {
         review-plan|revise) echo "$DIR_REVIEW" ;;
         implement) echo "$DIR_IMPLEMENT" ;;
         review-code|fix) echo "$DIR_REVIEW_CODE" ;;
-        requirement-review) echo "$WORKSPACE_DIR/requirement-review" ;;
-        verify-observability) echo "$WORKSPACE_DIR/verify-observability" ;;
+        review-requirement) echo "$DIR_REVIEW_REQUIREMENT" ;;
+        verify-observability) echo "$DIR_VERIFY_OBSERVABILITY" ;;
         *) echo "$WORKSPACE_DIR/$1" ;;
     esac
 }
@@ -488,6 +672,11 @@ phase_transition_for_artifact() {
     "$BIN_DIR/workflow-manifest" transition --file "$FLOW_FILE" --phase "$phase_id" --artifact "$file"
 }
 
+artifact_verdict() {
+    local file="$1"
+    "$BIN_DIR/workflow-manifest" verdict --artifact "$file"
+}
+
 parse_config() {
     local config_file="$1"
     if [[ ! -f "$config_file" ]]; then
@@ -519,11 +708,13 @@ parse_config() {
             model_fix) MODEL_FIX="$value" ;;
             max_rounds) MAX_ROUNDS="$value" ;;
             phase_timeout) PHASE_TIMEOUT_MINUTES="$value" ;;
+            review_requirement) PHASE_REVIEW_REQUIREMENT="$value" ;;
             explore) PHASE_EXPLORE="$value" ;;
             design) PHASE_DESIGN="$value" ;;
             review_plan) PHASE_REVIEW_PLAN="$value" ;;
             implement) PHASE_IMPLEMENT="$value" ;;
             review_code) PHASE_REVIEW_CODE="$value" ;;
+            verify_observability) PHASE_VERIFY_OBSERVABILITY="$value" ;;
             after_explore) BP_AFTER_EXPLORE="$value" ;;
             after_design) BP_AFTER_DESIGN="$value" ;;
             after_review) BP_AFTER_REVIEW="$value" ;;
@@ -557,9 +748,9 @@ Options:
   --model-review-code <model> 代码评审阶段模型（未指定则继承 --model）
   --model-fix <model>     代码修复阶段模型（未指定则继承 --model）
   --max-rounds <n>        review/revise 和 review-code/fix 循环最大轮数（默认 3）
-  --phase-timeout <min>   交互阶段最长等待分钟数（默认 0，不超时）
+  --phase-timeout <min>   单阶段最长运行/等待分钟数（默认 0，不超时）
   --explore               启用探索阶段
-  --skip <phase>          跳过指定阶段 (explore/design/review/implement/review-code)
+  --skip <phase>          跳过指定阶段 (review-requirement/explore/design/review/implement/review-code/verify-observability)
   --auto                  全自动模式（无断点）
   --resume                从上次中断处继续（跳过已有产出的阶段）
   --no-break <phase>      取消指定阶段后的断点
@@ -627,11 +818,13 @@ while [[ $# -gt 0 ]]; do
         --explore) PHASE_EXPLORE=true; shift ;;
         --skip)
             case "$2" in
+                review-requirement|requirement-review) PHASE_REVIEW_REQUIREMENT=false ;;
                 explore) PHASE_EXPLORE=false ;;
                 design) PHASE_DESIGN=false ;;
                 review|review-plan) PHASE_REVIEW_PLAN=false ;;
                 implement) PHASE_IMPLEMENT=false ;;
                 review-code) PHASE_REVIEW_CODE=false ;;
+                verify-observability|observability) PHASE_VERIFY_OBSERVABILITY=false ;;
                 *) log_error "未知阶段: $2"; exit 1 ;;
             esac
             shift 2
@@ -729,11 +922,13 @@ fi
 WORKSPACE_DIR="$WORKSPACE_DIR/$TASK_NAME"
 
 # 阶段子目录
+DIR_REVIEW_REQUIREMENT="$WORKSPACE_DIR/requirement-review"
 DIR_EXPLORE="$WORKSPACE_DIR/explore"
 DIR_DESIGN="$WORKSPACE_DIR/design"
 DIR_REVIEW="$WORKSPACE_DIR/review"
 DIR_IMPLEMENT="$WORKSPACE_DIR/implement"
 DIR_REVIEW_CODE="$WORKSPACE_DIR/review-code"
+DIR_VERIFY_OBSERVABILITY="$WORKSPACE_DIR/verify-observability"
 STATE_FILE="$WORKSPACE_DIR/workflow-state.json"
 RUN_FLOW_FILE="$WORKSPACE_DIR/workflow.json"
 WORKFLOW_ID="$(basename "$PROJECT_DIR")-${TASK_NAME}-$(date +%Y%m%d%H%M%S)"
@@ -773,7 +968,7 @@ if [[ "$RESUME_MODE" != true ]]; then
 fi
 
 # Create workspace and phase directories
-mkdir -p "$WORKSPACE_DIR" "$DIR_EXPLORE" "$DIR_DESIGN" "$DIR_REVIEW" "$DIR_IMPLEMENT" "$DIR_REVIEW_CODE"
+mkdir -p "$WORKSPACE_DIR" "$DIR_REVIEW_REQUIREMENT" "$DIR_EXPLORE" "$DIR_DESIGN" "$DIR_REVIEW" "$DIR_IMPLEMENT" "$DIR_REVIEW_CODE" "$DIR_VERIFY_OBSERVABILITY"
 
 if [[ "$RESUME_MODE" == true && -f "$RUN_FLOW_FILE" ]]; then
     FLOW_FILE="$RUN_FLOW_FILE"
@@ -790,12 +985,16 @@ elif [[ -n "$FLOW_TEMPLATE_FILE" ]]; then
         --provider "$PROVIDER"
         --model "$(model_for_state "$MODEL")"
         --max-rounds "$MAX_ROUNDS"
+        --phase-timeout-minutes "$PHASE_TIMEOUT_MINUTES"
     )
     if [[ "$BP_AFTER_EXPLORE" == true ]]; then CREATE_FLOW_ARGS+=(--break explore); else CREATE_FLOW_ARGS+=(--no-break explore); fi
     if [[ "$BP_AFTER_DESIGN" == true ]]; then CREATE_FLOW_ARGS+=(--break design); else CREATE_FLOW_ARGS+=(--no-break design); fi
     if [[ "$BP_AFTER_REVIEW" == true ]]; then CREATE_FLOW_ARGS+=(--break review-plan); else CREATE_FLOW_ARGS+=(--no-break review-plan); fi
     if [[ "$BP_AFTER_IMPLEMENT" == true ]]; then CREATE_FLOW_ARGS+=(--break implement); else CREATE_FLOW_ARGS+=(--no-break implement); fi
     if [[ "$BP_AFTER_REVIEW_CODE" == true ]]; then CREATE_FLOW_ARGS+=(--break review-code); else CREATE_FLOW_ARGS+=(--no-break review-code); fi
+    if [[ "$PHASE_REVIEW_REQUIREMENT" != true || -z "$REQUIREMENT_FILE" ]]; then
+        CREATE_FLOW_ARGS+=(--disable review-requirement)
+    fi
     if [[ "$PHASE_EXPLORE" == true ]]; then
         CREATE_FLOW_ARGS+=(--enable explore)
     else
@@ -810,32 +1009,57 @@ elif [[ -n "$FLOW_TEMPLATE_FILE" ]]; then
         CREATE_FLOW_ARGS+=(--disable implement)
     fi
     if [[ "$PHASE_REVIEW_CODE" != true ]]; then
-        CREATE_FLOW_ARGS+=(--disable review-code --disable fix)
+        CREATE_FLOW_ARGS+=(--disable review-code --disable fix --disable verify-observability)
+    elif [[ "$PHASE_VERIFY_OBSERVABILITY" != true ]]; then
+        CREATE_FLOW_ARGS+=(--disable verify-observability)
     fi
     "$BIN_DIR/create-workflow-run" "${CREATE_FLOW_ARGS[@]}" >/dev/null
     FLOW_FILE="$RUN_FLOW_FILE"
     FLOW_SCHEMA_VERSION="$(validate_flow_manifest "$FLOW_FILE")"
 fi
 
+if [[ "$RESUME_MODE" == true && -n "$FLOW_FILE" ]]; then
+    RUN_PROVIDER="$("$BIN_DIR/workflow-manifest" root-get --file "$FLOW_FILE" --key provider)"
+    RUN_MODEL="$("$BIN_DIR/workflow-manifest" root-get --file "$FLOW_FILE" --key model)"
+    if [[ "$MODEL_FROM_USER" == true && "$(model_for_state "$MODEL")" != "$RUN_MODEL" ]]; then
+        log_warn "--resume 忽略本次传入的模型，复用 run workflow 已保存模型: $RUN_MODEL"
+    fi
+    PROVIDER="$RUN_PROVIDER"
+    if [[ "$RUN_MODEL" == "provider-default" ]]; then
+        MODEL=""
+    else
+        MODEL="$RUN_MODEL"
+    fi
+    detect_provider
+fi
+
 if [[ -n "$FLOW_FILE" ]]; then
+    PHASE_REVIEW_REQUIREMENT=false
     PHASE_EXPLORE=false
     PHASE_DESIGN=false
     PHASE_REVIEW_PLAN=false
     PHASE_IMPLEMENT=false
     PHASE_REVIEW_CODE=false
+    PHASE_VERIFY_OBSERVABILITY=false
     while IFS= read -r phase_id; do
         case "$phase_id" in
+            review-requirement) PHASE_REVIEW_REQUIREMENT=true ;;
             explore) PHASE_EXPLORE=true ;;
             design) PHASE_DESIGN=true ;;
             review-plan) PHASE_REVIEW_PLAN=true ;;
             implement) PHASE_IMPLEMENT=true ;;
             review-code) PHASE_REVIEW_CODE=true ;;
+            verify-observability) PHASE_VERIFY_OBSERVABILITY=true ;;
         esac
     done < <("$BIN_DIR/workflow-manifest" execution-order --file "$FLOW_FILE" --kind order)
 
     FLOW_MAX_ROUNDS="$("$BIN_DIR/workflow-manifest" execution-get --file "$FLOW_FILE" --key max_rounds 2>/dev/null || true)"
     if [[ "$FLOW_MAX_ROUNDS" =~ ^[0-9]+$ ]]; then
         MAX_ROUNDS="$FLOW_MAX_ROUNDS"
+    fi
+    FLOW_PHASE_TIMEOUT="$("$BIN_DIR/workflow-manifest" execution-get --file "$FLOW_FILE" --key phase_timeout_minutes 2>/dev/null || true)"
+    if [[ "$FLOW_PHASE_TIMEOUT" =~ ^[0-9]+$ ]]; then
+        PHASE_TIMEOUT_MINUTES="$FLOW_PHASE_TIMEOUT"
     fi
     if "$BIN_DIR/workflow-manifest" phase-get --file "$FLOW_FILE" --phase design --field breakpoint_after >/dev/null 2>&1; then
         BP_AFTER_EXPLORE="$("$BIN_DIR/workflow-manifest" breakpoint-after --file "$FLOW_FILE" --phase explore)"
@@ -860,6 +1084,7 @@ if [[ -n "$FLOW_FILE" ]]; then
     state_cmd set-workflow-meta --file "$STATE_FILE" --key flow_schema_version --value "$FLOW_SCHEMA_VERSION"
     state_cmd set-workflow-meta --file "$STATE_FILE" --key source_manifest --value "$FLOW_TEMPLATE_FILE"
 fi
+record_main_agent_session
 validate_workflow_state
 if ! validate_workspace_artifacts; then
     if [[ "$RESUME_MODE" == true ]]; then
@@ -915,7 +1140,8 @@ if [[ -n "$GHOSTTY_WINDOW_ID" ]]; then
     state_cmd set-workflow-meta --file "$STATE_FILE" --key ghostty_window_id --value "$GHOSTTY_WINDOW_ID"
 fi
 if [[ "$RESUME_MODE" == true ]]; then
-    log_info "续跑模式: 已有产出的阶段将被跳过"
+    log_info "续跑模式: 将根据 workflow-state.json 状态和产物校验决定跳过或重跑"
+    log_resume_summary
 fi
 echo ""
 
@@ -1063,7 +1289,7 @@ run_phase() {
             echo ""
             echo -e "${YELLOW}[WAIT]${NC} 仍在等待 $phase_name 完成（已等待 ${waited_minutes}m）。"
             echo "  - 如 agent 已完成但忘了写状态，可手动执行:"
-            echo "    \"$BIN_DIR/workflow-state\" phase-finish --file \"$STATE_FILE\" --phase \"$phase_name\" --status done --exit-code 0 --output-file \"$output_file\""
+            echo "    \"$BIN_DIR/workflow-state\" phase-finish-active --file \"$STATE_FILE\" --status done --exit-code 0 --output-file \"$output_file\""
             echo "  - 如想放弃该阶段: 将 --status 改为 failed，编排器会退出并保留状态。"
         fi
     done
@@ -1077,17 +1303,23 @@ run_phase() {
         log_error "$phase_name 失败，exit=${exit_code}"
         exit 1
     fi
-    state_cmd set-workflow-meta --file "$STATE_FILE" --key last_finished_phase --value "$phase_name"
 
     if [[ -f "$output_file" ]]; then
-        if ! validate_phase_artifact "$skill_name" "$output_file"; then
-            log_error "$phase_name 的产物未通过内容校验，请先修订 $output_file"
+        if ! ensure_phase_artifact "$phase_name" "$skill_name" "$output_file" "$log_dir" "$phase_model"; then
+            state_cmd phase-finish \
+                --file "$STATE_FILE" \
+                --phase "$phase_name" \
+                --status failed \
+                --exit-code 65 \
+                --output-file "$output_file"
+            log_error "$phase_name 的产物未通过内容校验或自动纠正，请修订 $output_file"
             exit 1
         fi
         if ! validate_workspace_artifacts; then
             log_error "$phase_name 完成后 workspace 产物命名/指针校验失败，请修订 $WORKSPACE_DIR"
             exit 1
         fi
+        state_cmd set-workflow-meta --file "$STATE_FILE" --key last_finished_phase --value "$phase_name"
         log_success "$phase_name 完成 → $output_file"
     else
         log_warn "$phase_name 完成，但输出文件未生成，请检查 ${log_dir}/${phase_name}.log"
@@ -1128,16 +1360,11 @@ run_analysis_phase() {
         --run-script "$log_file" \
         --started-epoch "$phase_started_epoch"
     state_cmd set-workflow-meta --file "$STATE_FILE" --key current_phase --value "$phase_name"
+    ACTIVE_PHASE_NAME="$phase_name"
+    ACTIVE_PHASE_OUTPUT="$output_file"
 
     set +e
-    "$BIN_DIR/run-provider-noninteractive" \
-        --provider "$PROVIDER" \
-        --provider-cli "$PROVIDER_CLI" \
-        --model "$phase_model" \
-        --project-dir "$PROJECT_DIR" \
-        --workspace-dir "$WORKSPACE_DIR" \
-        --prompt-file "$prompt_file" \
-        --log-file "$log_file"
+    run_provider_noninteractive "$phase_model" "$prompt_file" "$log_file"
     local exit_code
     exit_code="$?"
     set -e
@@ -1145,6 +1372,9 @@ run_analysis_phase() {
     local phase_status="done"
     if [[ "$exit_code" != "0" || ! -f "$output_file" ]]; then
         phase_status="failed"
+    elif ! ensure_phase_artifact "$phase_name" "$skill_name" "$output_file" "$log_dir" "$phase_model"; then
+        phase_status="failed"
+        exit_code=65
     fi
 
     state_cmd phase-finish \
@@ -1153,7 +1383,11 @@ run_analysis_phase() {
         --status "$phase_status" \
         --exit-code "$exit_code" \
         --output-file "$output_file"
-    state_cmd set-workflow-meta --file "$STATE_FILE" --key last_finished_phase --value "$phase_name"
+    ACTIVE_PHASE_NAME=""
+    ACTIVE_PHASE_OUTPUT=""
+    if [[ "$phase_status" == "done" ]]; then
+        state_cmd set-workflow-meta --file "$STATE_FILE" --key last_finished_phase --value "$phase_name"
+    fi
 
     rm -f "$prompt_file"
 
@@ -1162,11 +1396,6 @@ run_analysis_phase() {
         if [[ -f "$log_file" ]]; then
             tail -80 "$log_file" || true
         fi
-        exit 1
-    fi
-
-    if ! validate_phase_artifact "$skill_name" "$output_file"; then
-        log_error "$phase_name 的产物未通过内容校验，请先修订 $output_file"
         exit 1
     fi
 
@@ -1461,7 +1690,36 @@ run_single_phase() {
     phase_name="$(phase_instance_name "$phase_id")"
     log_phase "$phase_id" "$phase_id"
     run_phase_instance "$phase_id" "$phase_name" "" "$context" "$output_file"
+    handle_single_phase_verdict "$phase_id" "$output_file"
     maybe_breakpoint "$phase_id" "$output_file"
+}
+
+handle_single_phase_verdict() {
+    local phase_id="$1"
+    local output_file="$2"
+    local verdict=""
+    verdict="$(artifact_verdict "$output_file" 2>/dev/null || true)"
+
+    case "$phase_id:$verdict" in
+        review-requirement:NEEDS_CLARIFICATION)
+            if [[ "$AUTO_MODE" == true ]]; then
+                log_error "需求审视需要澄清，auto 模式停止推进。请更新 requirement.md 后使用 --resume。"
+                exit 1
+            fi
+            wait_for_user "需求审视发现必须澄清的问题。请先根据报告更新 requirement.md；确认后继续。" "$output_file" "忽略澄清问题并继续后续阶段"
+            ;;
+        verify-observability:NEEDS_FIX)
+            if [[ "$AUTO_MODE" == true ]]; then
+                log_error "可观测性验证未通过，auto 模式停止推进。请按报告补齐后使用 --resume。"
+                exit 1
+            fi
+            wait_for_user "可观测性验证发现必须修复的问题。建议先修复后再继续。" "$output_file" "接受当前可观测性风险并结束流程"
+            if [[ "${WAIT_CHOICE:-}" != "accept" ]]; then
+                log_error "可观测性验证未通过。修复后可用 --resume 继续。"
+                exit 1
+            fi
+            ;;
+    esac
 }
 
 run_review_loop() {
@@ -1476,7 +1734,7 @@ run_review_loop() {
 
     if [[ "$RESUME_MODE" == true && -f "$latest" ]]; then
         if validate_phase_artifact "$review_phase" "$latest" && artifact_verdict_is_pass "$latest"; then
-            log_info "跳过 $review_phase（已有已校验 VERDICT: PASS）"
+            log_info "跳过 ${review_phase}（已有已校验 VERDICT: PASS）"
             already_passed=true
         else
             local resume_transition meta_loop meta_round fixup_resume_output
@@ -1566,9 +1824,13 @@ run_review_loop() {
     done
 }
 
+trap 'handle_active_phase_signal 130' INT
+trap 'handle_active_phase_signal 143' TERM
+trap 'handle_active_phase_signal 129' HUP
+
 while IFS= read -r phase_id; do
     if is_runtime_skipped "$phase_id"; then
-        log_info "跳过 $phase_id（运行时断点选择）"
+        log_info "跳过 ${phase_id}（运行时断点选择）"
         continue
     fi
     if is_loop_fixup_phase "$phase_id"; then
@@ -1598,21 +1860,25 @@ echo -e "工作区: ${BOLD}$WORKSPACE_DIR${NC}"
 echo ""
 echo "产出文件:"
 EXPLORE_OUTPUT="$(phase_artifact_path "explore" "primary")"
+REQUIREMENT_REVIEW_OUTPUT="$(phase_artifact_path "review-requirement" "primary")"
 DESIGN_OUTPUT="$(phase_artifact_path "design" "primary")"
 REVIEW_LATEST="$(phase_artifact_path "review-plan" "latest")"
 IMPLEMENT_OUTPUT="$(phase_artifact_path "implement" "primary")"
 CODE_REVIEW_LATEST="$(phase_artifact_path "review-code" "latest")"
+OBSERVABILITY_OUTPUT="$(phase_artifact_path "verify-observability" "primary")"
 
 # 按阶段列出产出
 for entry in \
     "$WORKSPACE_DIR/requirement.md|requirement.md" \
     "$WORKSPACE_DIR/idea.txt|idea.txt" \
+    "$REQUIREMENT_REVIEW_OUTPUT|requirement-review/requirement-review.md" \
     "$EXPLORE_OUTPUT|explore/exploration.md" \
     "$DESIGN_OUTPUT|design/plan.md" \
     "$DIR_DESIGN/implementation-brief.md|design/implementation-brief.md" \
     "$REVIEW_LATEST|review/review.md" \
     "$IMPLEMENT_OUTPUT|implement/impl-notes.md" \
-    "$CODE_REVIEW_LATEST|review-code/code-review.md"; do
+    "$CODE_REVIEW_LATEST|review-code/code-review.md" \
+    "$OBSERVABILITY_OUTPUT|verify-observability/observability-report.md"; do
     full_path="${entry%%|*}"
     label="${entry##*|}"
     if [[ -f "$full_path" ]]; then

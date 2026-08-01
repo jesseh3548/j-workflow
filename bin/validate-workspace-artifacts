@@ -7,6 +7,8 @@ import os
 import re
 import sys
 
+from workflow_contract import validate_state_phase_names
+
 
 FORBIDDEN_PATTERNS = [
     "design/final-plan.md",
@@ -129,24 +131,7 @@ def validate_state_names(workspace, manifest, errors):
     if not os.path.exists(state_path):
         return
     state = load_json(state_path)
-    if manifest.get("kind") == "run":
-        phase_ids = set(manifest.get("execution", {}).get("order", []))
-    else:
-        phase_ids = {phase["id"] for phase in manifest.get("phases", [])}
-    instance_patterns = []
-    for phase in manifest.get("phases", []):
-        if manifest.get("kind") == "run" and phase["id"] not in phase_ids:
-            continue
-        pattern = phase.get("instance_name_template", phase["id"])
-        regex = re.escape(pattern).replace(re.escape("{round}"), r"[1-9][0-9]*")
-        instance_patterns.append(re.compile(f"^{regex}$"))
-
-    for name in state.get("phases", {}):
-        if name in phase_ids:
-            continue
-        if any(regex.match(name) for regex in instance_patterns):
-            continue
-        errors.append(f"workflow-state phase name is not allowed by manifest templates: {name}")
+    errors.extend(validate_state_phase_names(state, manifest))
 
 
 def validate(args):

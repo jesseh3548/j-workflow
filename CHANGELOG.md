@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Fetch Claude model options fresh from the configured gateway `/v1/models` during each new `/jflow` initialization, group Opus/Sonnet/Haiku by descending version with US-route preference, persist only the selected model in the run workflow, and restore that selection on `--resume`.
+- Persist the invoking main orchestrator agent in `workflow-state.json.main_agent` when `CLAUDE_CODE_SESSION_ID` or `CODEX_THREAD_ID` uniquely identifies the current session. Main-agent provider is tracked independently from the provider selected for workflow phases.
+- Fix Claude non-interactive execution to run from the declared project directory, grant the declared workspace with `--add-dir`, close inherited stdin so phase iteration cannot be consumed, enforce configured phase timeouts, and converge interrupted phases to `failed`. Invalid machine-format artifacts now receive one artifact-only repair attempt before the phase fails.
+- Persist `phase_timeout_minutes` in workspace run `workflow.json` and restore it on `--resume`, so timeout policy follows the run instead of the latest CLI defaults.
+- Add a `--resume` startup summary using `current_phase`, `last_finished_phase`, `current_loop`, `current_round`, and artifact validation metadata to make recovery decisions visible.
+- Rename the orchestrator skill from `/workflow` to `/jflow` in the repository and documentation while keeping `.workflow/`, `workflow.json`, and `workflow-state.json` unchanged for compatibility.
+- Finish Phase C manifest migration: shell runs now share `execution.default_order` with `/jflow`, including `review-requirement` and `verify-observability`, with fake-provider smoke coverage for PASS and failure verdict branches.
+- Slim `jflow/SKILL.md` to 309 lines by moving detailed phase contracts to `workflow.json`, prompt templates, and helper scripts while keeping the orchestration and artifact synchronization rules.
 - Add a `noninteractive-task` prompt footer so forced non-interactive interactive phases can modify project files during real CLI validation while still avoiding workflow-state writes.
 - Harden phase prompt templates with explicit artifact validation keywords so real Codex/Claude outputs satisfy the same contracts enforced by `bin/validate-artifact`.
 - Replace the shell orchestrator mainline with a manifest-driven generic phase engine, add `tests/fake-provider` plus `tests/smoke.sh`, and cover PASS, revise retry, and max-rounds failure paths for WP8.
@@ -15,7 +23,7 @@
 - Add `--max-rounds` / `max_rounds` to cap review/revise and review-code/fix loops, exiting safely in `--auto` mode when a loop is exhausted (WP2 in `docs/plans/refactor-and-manifest-migration.md`).
 - Fix config precedence so explicit CLI flags override values loaded from `.workflow-config.yaml` (WP1 in `docs/plans/refactor-and-manifest-migration.md`).
 - Fix `parse_config` not stripping inline `#` comments, which made the shipped `workflow-config.example.yaml` silently disable all phase toggles and breakpoints (WP0 in `docs/plans/refactor-and-manifest-migration.md`).
-- Add `docs/plans/refactor-and-manifest-migration.md`: executable work packages for bug fixes (CLI-over-config precedence, review-loop round caps, breakpoint semantics), shared capabilities (workspace archiving, poll-timeout hints, state-driven resume), full manifest-driven migration of `orchestrate.sh`, and the `/workflow` → `/jflow` skill rename.
+- Add `docs/plans/refactor-and-manifest-migration.md`: executable work packages for bug fixes (CLI-over-config precedence, review-loop round caps, breakpoint semantics), shared capabilities (workspace archiving, poll-timeout hints, state-driven resume), full manifest-driven migration of `orchestrate.sh`, and the skill rename to `/jflow`.
 - Fix Ghostty phase run scripts failing with `claude: command not found` / `codex: command not found` when the CLI executable is not available in the non-interactive shell PATH. The orchestrator now resolves Claude Code/Codex to an absolute executable path up front and writes that path into generated run scripts.
 - Add `CLAUDE_BIN` / `CODEX_BIN` override support for non-standard CLI install locations.
 - Start Ghostty phases through a temporary no-space launcher script instead of `bash <run_script>`, avoiding Chinese IME conversion of `bash` and Ghostty command argument parsing failures.
@@ -23,7 +31,7 @@
 - Restructure `review-code` rules into an Alibaba Java Coding Guidelines-style hierarchy with a routing index and focused rule files for programming, exception/logging, MySQL, project, security, testing, performance, and observability reviews.
 - Add `design/implementation-brief.md` as a plan-derived implementation checklist / trace index and pass it through implement, review-code, and fix prompts so new sessions can verify completeness without treating the brief as a second source of truth.
 - Add review-code context budget rules: hunk-first diff reading, staged/unstaged coverage, and bounded line-window reads for large source files.
-- Update `/workflow` skill execution flow so pure analysis phases run as bounded subagent phases, while explore/design/revise/implement/fix remain Ghostty interactive phases.
+- Update `/jflow` skill execution flow so pure analysis phases run as bounded subagent phases, while explore/design/revise/implement/fix remain Ghostty interactive phases.
 - Strengthen design/review-plan/implement contracts: plan.md is the single source of truth, implementation-brief is only a plan-derived checklist, review-plan verifies hidden assumptions, and workflow performs lightweight artifact quality checks.
 - Clarify provider-native capabilities: `/explore` no longer forces Claude's native Explore subagent, and Claude Code dynamic workflow is documented as separate from j-workflow orchestration.
 - Add phase-specific model overrides for the shell orchestrator and config file, including design/review/implement/review-code/fix model selection.
@@ -33,7 +41,7 @@
 - Add `--skip-git-repo-check` to the Codex non-interactive runner so analysis phases can run in temporary validation/workspace directories.
 - Require review-code/fix/manual CR decisions to synchronize final facts back into `design/plan.md`, and into `design/implementation-brief.md` when checklist content changes.
 - Clarify that `design/plan.md` is the only final/latest plan filename; fix/manual CR updates modify it directly instead of creating additional final-plan variants.
-- Align `/workflow` artifact validation docs with `workflow.json` for Plan/Brief synchronization fields, while leaving `review-requirement` and `verify-observability` out of the shell entry for now.
+- Align `/jflow` artifact validation docs with `workflow.json` for Plan/Brief synchronization fields.
 - Add `bin/validate-workspace-artifacts` and call it from `orchestrate.sh` to enforce workspace artifact names, latest pointers, contiguous review/fix rounds, forbidden plan variants, and manifest-compatible state phase names.
 - Add `TODO.md` as the short current backlog so future agents do not need to infer active work from historical optimization notes.
 - Replace interactive phase `.done` marker files with `workflow-state.json` phase status as the single completion signal; run scripts now only use workflow state for user-confirmed completion and exit-code fallback.

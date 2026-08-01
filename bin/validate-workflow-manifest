@@ -3,6 +3,8 @@ import json
 import os
 import sys
 
+from workflow_contract import validate_instance_name_template, validate_phase_id
+
 
 def main():
     if len(sys.argv) != 2:
@@ -62,6 +64,8 @@ def main():
         for key in required_phase_keys:
             if key not in phase:
                 raise ValueError(f"phase {phase.get('id', '<unknown>')} missing required key: {key}")
+        validate_phase_id(phase["id"])
+        validate_instance_name_template(phase["instance_name_template"])
         if phase["id"] in phase_map:
             raise ValueError(f"duplicate phase id: {phase['id']}")
         phase_map[phase["id"]] = phase
@@ -132,6 +136,10 @@ def main():
         max_rounds = execution["max_rounds"]
         if not isinstance(max_rounds, int) or max_rounds < 0:
             raise ValueError("execution.max_rounds must be a non-negative integer")
+    if "phase_timeout_minutes" in execution:
+        phase_timeout = execution["phase_timeout_minutes"]
+        if not isinstance(phase_timeout, int) or phase_timeout < 0:
+            raise ValueError("execution.phase_timeout_minutes must be a non-negative integer")
     if "breakpoints" in execution:
         breakpoints = execution["breakpoints"]
         if not isinstance(breakpoints, dict):
@@ -141,7 +149,10 @@ def main():
                 raise ValueError(f"execution.breakpoints references unknown phase: {phase_id}")
             if not isinstance(enabled, bool):
                 raise ValueError(f"execution.breakpoints.{phase_id} must be a boolean")
-    for key in ("skill_order", "shell_order", "shell_excluded"):
+    execution_order_keys = [key for key in ("default_order", "skill_order", "shell_order", "shell_excluded") if key in execution]
+    if not execution_order_keys:
+        raise ValueError("execution must define default_order, skill_order, or shell_order")
+    for key in execution_order_keys:
         values = execution.get(key)
         if not isinstance(values, list) or not all(isinstance(item, str) for item in values):
             raise ValueError(f"execution.{key} must be a string list")
@@ -149,6 +160,12 @@ def main():
             if phase_id not in phase_map:
                 raise ValueError(f"execution.{key} references unknown phase: {phase_id}")
     if data.get("kind") == "run":
+        provider = data.get("provider")
+        model = data.get("model")
+        if not isinstance(provider, str) or not provider:
+            raise ValueError("run workflow provider must be a non-empty string")
+        if not isinstance(model, str) or not model:
+            raise ValueError("run workflow model must be a non-empty string")
         values = execution.get("order")
         if not isinstance(values, list) or not values or not all(isinstance(item, str) for item in values):
             raise ValueError("run workflow execution.order must be a non-empty string list")

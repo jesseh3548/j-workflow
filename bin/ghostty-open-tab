@@ -84,7 +84,6 @@ LAUNCHER
                 set initial working directory of cfg to \"$WORKING_DIR\"
                 set command of cfg to \"$launcher_path\"
                 set wait after command of cfg to true
-                set environment variables of cfg to {\"NODE_TLS_REJECT_UNAUTHORIZED=0\"}
                 set win to window id \"$GHOSTTY_WINDOW_ID\"
                 new tab in win with configuration cfg
             end tell
@@ -96,7 +95,6 @@ LAUNCHER
                 set initial working directory of cfg to \"$WORKING_DIR\"
                 set command of cfg to \"$launcher_path\"
                 set wait after command of cfg to true
-                set environment variables of cfg to {\"NODE_TLS_REJECT_UNAUTHORIZED=0\"}
                 new window with configuration cfg
             end tell
         " 2>/dev/null || { rm -f "$launcher_path"; return 1; }

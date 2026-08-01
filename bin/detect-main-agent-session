@@ -1,0 +1,69 @@
+#!/usr/bin/env python3
+import os
+import re
+import sys
+
+
+UUID_RE = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+    r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
+
+
+def valid_uuid(value):
+    return isinstance(value, str) and bool(UUID_RE.fullmatch(value))
+
+
+def detected_sessions():
+    explicit_id = os.environ.get("JFLOW_MAIN_AGENT_SESSION_ID", "")
+    explicit_provider = os.environ.get("JFLOW_MAIN_AGENT_PROVIDER", "")
+    if explicit_id or explicit_provider:
+        if explicit_provider not in {"claude", "codex"} or not valid_uuid(explicit_id):
+            raise ValueError(
+                "JFLOW_MAIN_AGENT_PROVIDER must be claude/codex and "
+                "JFLOW_MAIN_AGENT_SESSION_ID must be a UUID"
+            )
+        return [(explicit_provider, explicit_id)]
+
+    candidates = []
+    claude_id = os.environ.get("CLAUDE_CODE_SESSION_ID", "")
+    codex_id = os.environ.get("CODEX_THREAD_ID", "")
+    claude_runtime = bool(
+        os.environ.get("CLAUDECODE")
+        or os.environ.get("CLAUDE_CODE_ENTRYPOINT")
+    )
+    if claude_runtime and valid_uuid(claude_id):
+        # A Claude session launched from a Codex shell can inherit
+        # CODEX_THREAD_ID. CLAUDECODE/CLAUDE_CODE_ENTRYPOINT identifies the
+        # innermost runtime, so the Claude session is the current main agent.
+        return [("claude", claude_id)]
+    if valid_uuid(claude_id):
+        candidates.append(("claude", claude_id))
+    if valid_uuid(codex_id):
+        candidates.append(("codex", codex_id))
+    return candidates
+
+
+def main():
+    try:
+        candidates = detected_sessions()
+    except ValueError as exc:
+        print(f"[ERROR] detect-main-agent-session: {exc}", file=sys.stderr)
+        return 2
+
+    if not candidates:
+        return 1
+    if len(candidates) > 1:
+        print(
+            "[ERROR] detect-main-agent-session: multiple main-agent session IDs detected",
+            file=sys.stderr,
+        )
+        return 2
+
+    provider, session_id = candidates[0]
+    print(f"{provider}\t{session_id}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

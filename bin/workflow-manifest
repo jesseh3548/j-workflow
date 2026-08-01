@@ -89,6 +89,14 @@ def cmd_execution_get(args):
     return 0
 
 
+def cmd_root_get(args):
+    manifest = load_manifest(args.file)
+    if args.key not in manifest:
+        return 1
+    print_value(manifest[args.key])
+    return 0
+
+
 def cmd_breakpoint_after(args):
     manifest = load_manifest(args.file)
     phase = get_phase(manifest, args.phase)
@@ -235,13 +243,18 @@ def build_parser():
 
     p = sub.add_parser("execution-order")
     p.add_argument("--file", required=True)
-    p.add_argument("--kind", required=True, choices=["order", "skill_order", "shell_order", "shell_excluded", "disabled"])
+    p.add_argument("--kind", required=True, choices=["order", "default_order", "skill_order", "shell_order", "shell_excluded", "disabled"])
     p.set_defaults(func=cmd_execution_order)
 
     p = sub.add_parser("execution-get")
     p.add_argument("--file", required=True)
     p.add_argument("--key", required=True)
     p.set_defaults(func=cmd_execution_get)
+
+    p = sub.add_parser("root-get")
+    p.add_argument("--file", required=True)
+    p.add_argument("--key", required=True)
+    p.set_defaults(func=cmd_root_get)
 
     p = sub.add_parser("breakpoint-after")
     p.add_argument("--file", required=True)

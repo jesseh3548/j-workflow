@@ -1,10 +1,17 @@
 #!/usr/bin/env python3
 import json
 import os
+import re
 import sys
+
+from workflow_contract import load_manifest, manifest_path_from_state, validate_state_phase_names
 
 
 ALLOWED_PHASE_STATUS = {"running", "done", "failed", "skipped"}
+UUID_RE = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+    r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
 
 
 def require_string(obj, key, where):
@@ -56,7 +63,7 @@ def validate_phase(name, phase):
         require_string(phase, "exit_code", where)
 
 
-def validate_state(data):
+def validate_state(data, manifest_path=None):
     if not isinstance(data, dict):
         raise ValueError("workflow state must be an object")
 
@@ -71,6 +78,17 @@ def validate_state(data):
             if not isinstance(key, str) or not isinstance(value, str):
                 raise ValueError("state.metadata must map strings to strings")
 
+    if "main_agent" in data:
+        main_agent = data["main_agent"]
+        if not isinstance(main_agent, dict):
+            raise ValueError("state.main_agent must be an object")
+        for key in ("provider", "session_id", "recorded_at"):
+            require_string(main_agent, key, "state.main_agent")
+        if main_agent["provider"] not in {"claude", "codex"}:
+            raise ValueError(f"state.main_agent.provider has invalid value: {main_agent['provider']}")
+        if not UUID_RE.fullmatch(main_agent["session_id"]):
+            raise ValueError("state.main_agent.session_id must be a UUID")
+
     phases = data.get("phases")
     if not isinstance(phases, dict):
         raise ValueError("state.phases must be an object")
@@ -79,13 +97,24 @@ def validate_state(data):
             raise ValueError("phase names must be non-empty strings")
         validate_phase(name, phase)
 
+    resolved_manifest = manifest_path or manifest_path_from_state(data)
+    if resolved_manifest:
+        if not os.path.isfile(resolved_manifest):
+            raise ValueError(f"workflow manifest not found: {resolved_manifest}")
+        errors = validate_state_phase_names(data, load_manifest(resolved_manifest))
+        if errors:
+            raise ValueError(errors[0])
+
 
 def main():
-    if len(sys.argv) != 2:
-        print("usage: validate-workflow-state <workflow-state.json>", file=sys.stderr)
-        return 2
+    import argparse
 
-    path = sys.argv[1]
+    parser = argparse.ArgumentParser(description="Validate a j-workflow runtime state.")
+    parser.add_argument("state_file")
+    parser.add_argument("--manifest")
+    args = parser.parse_args()
+
+    path = args.state_file
     if not os.path.isfile(path):
         print(f"[ERROR] workflow state not found: {path}", file=sys.stderr)
         return 1
@@ -93,7 +122,7 @@ def main():
     with open(path, "r", encoding="utf-8") as f:
         data = json.load(f)
 
-    validate_state(data)
+    validate_state(data, args.manifest)
     print("ok")
     return 0
 

@@ -8,9 +8,20 @@ import stat
 ENV_VARS = [
     "ANTHROPIC_AUTH_TOKEN",
     "ANTHROPIC_API_KEY",
+    "ANTHROPIC_BASE_URL",
     "ANTHROPIC_BEDROCK_BASE_URL",
+    "ANTHROPIC_CUSTOM_HEADERS",
+    "ANTHROPIC_CUSTOM_MODEL_OPTION",
+    "ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION",
+    "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME",
+    "ANTHROPIC_DEFAULT_FABLE_MODEL",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL",
     "ANTHROPIC_MODEL",
     "ANTHROPIC_SMALL_FAST_MODEL",
+    "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY",
+    "CLAUDE_CODE_SUBAGENT_MODEL",
     "CLAUDE_CODE_USE_BEDROCK",
     "CLAUDE_CODE_SKIP_BEDROCK_AUTH",
     "CLAUDE_CODE_USE_VERTEX",
@@ -53,14 +64,12 @@ def render_provider_command(args):
             return f"""{cli} \\
 {claude_model}\
     --resume {q(args.resume_session_id)} \\
-    --add-dir {project_dir} \\
     --permission-mode default \\
     --verbose \\
     -- {prompt}"""
         if args.resume_session_name:
             return f"""{cli} \\
 {claude_model}\
-    --add-dir {project_dir} \\
     --permission-mode default \\
     --verbose \\
     --resume {q(args.resume_session_name)} \\
@@ -68,7 +77,6 @@ def render_provider_command(args):
         return f"""{cli} \\
 {claude_model}\
     --name {q(args.session_name)} \\
-    --add-dir {project_dir} \\
     --permission-mode default \\
     --verbose \\
     -- {prompt}"""
@@ -92,12 +100,13 @@ def render_script(args):
     exports = env_exports()
     provider_command = render_provider_command(args)
     display_model = args.model or "provider-default"
+    tls_export = "export NODE_TLS_REJECT_UNAUTHORIZED=0" if args.provider == "codex" else ""
     state_file = q(args.state_file)
     workflow_state = q(args.workflow_state)
     phase = q(args.phase)
     output_file = q(args.output_file)
     return f"""#!/bin/bash
-export NODE_TLS_REJECT_UNAUTHORIZED=0
+{tls_export}
 export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"
 swift -e 'import Carbon; let s = TISCreateInputSourceList([kTISPropertyInputSourceID: "com.apple.keylayout.ABC" as CFString] as CFDictionary, false)!.takeRetainedValue() as! [TISInputSource]; if let i = s.first {{ TISSelectInputSource(i) }}' 2>/dev/null || true
 {exports}

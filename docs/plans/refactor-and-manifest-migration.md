@@ -107,23 +107,25 @@ Phase D（改名，随时可做，建议最后做避免和 C 冲突）:  WP11
 
 ### WP12：解除默认模型硬编码 ✅（2026-07-10）
 
-**现状**：`MODEL="claude-sonnet-4-6"` 写死在 `orchestrate.sh:52`，README、示例配置、`workflow/SKILL.md` 多处引用。模型下线时所有入口同时坏。
+**现状**：`MODEL="claude-sonnet-4-6"` 写死在 `orchestrate.sh:52`，README、示例配置、`jflow/SKILL.md` 多处引用。模型下线时所有入口同时坏。
 
 **目标**：Claude 侧默认不传 `--model`，用用户 Claude CLI 自己配置的默认模型；Codex 保持现有 `~/.codex/config.toml` 探测。只有用户显式指定时才传模型参数。
 
-**改动文件**：`orchestrate.sh`、`bin/render-phase-run-script`、`bin/run-provider-noninteractive`、`README.md`、`workflow-config.example.yaml`、`workflow/SKILL.md`（0.1/0.3 节的模型描述）。
+**改动文件**：`orchestrate.sh`、`bin/render-phase-run-script`、`bin/run-provider-noninteractive`、`README.md`、`workflow-config.example.yaml`、`jflow/SKILL.md`（0.1/0.3 节的模型描述）。
 
 **做法**：
 1. `orchestrate.sh`：`MODEL=""` 为初始值。claude 分支不再兜底具体型号；codex 分支保留 `detect_codex_default_model`（其内部兜底值 `gpt-5.5` 改为空亦可，保持现状也接受）。
 2. `get_phase_model`：`$MODEL` 为空时返回空串。
 3. `bin/render-phase-run-script` 和 `bin/run-provider-noninteractive`：`--model` 值为空时，生成的命令行**不包含**模型参数（claude 不加 `--model`，codex 不加 `-m/--model`）。检查这两个脚本当前的拼接逻辑，加 `if [[ -n "$MODEL" ]]` 守卫。
 4. state 记录：模型为空时 `phase-start --model` 传 `provider-default` 字面量，便于事后审计。
-5. 文档同步：把「Claude 默认 claude-sonnet-4-6」改为「Claude 默认使用 CLI 自身配置的模型」；示例配置里的具体型号仅作为示例保留并注明。
+5. 文档同步：把旧的具体 Claude 型号移出当前配置示例；`/jflow` 初始化时实时读取 gateway `/v1/models`，直接运行 shell 且未传模型时才使用 Claude CLI 自身配置。
 
 **验收**：
 - 不带 `--model` 跑 claude：生成的 run script / 非交互命令里没有 `--model`；`workflow-state.json` 里 model 为 `provider-default`。
 - `--model X`：命令里含 `--model X`。
 - codex 不带 `--model`：仍读 config.toml。
+
+**后续扩展（2026-08-02）**：新增 `bin/list-claude-models`，每次新建 `/jflow` run 时实时拉取 gateway 目录；不缓存、不维护代码内置型号，选定后仅把模型 ID 写入 run workflow，`--resume` 复用该值。
 
 ---
 
@@ -131,11 +133,11 @@ Phase D（改名，随时可做，建议最后做避免和 C 冲突）:  WP11
 
 ### WP4：orchestrate.sh 接入归档逻辑（双入口共享） ✅（2026-07-10）
 
-**现状**：`workflow/SKILL.md` Phase 0.4 强制"发现旧产出先归档到 `archive/round-N/` 再清空"，逻辑以内联 bash 写在 skill 文档里；`orchestrate.sh` 完全没有归档，同名任务重跑会覆盖 `requirement.md` 并在旧产物上继续写。
+**现状**：`jflow/SKILL.md` Phase 0.4 强制"发现旧产出先归档到 `archive/round-N/` 再清空"，逻辑以内联 bash 写在 skill 文档里；`orchestrate.sh` 完全没有归档，同名任务重跑会覆盖 `requirement.md` 并在旧产物上继续写。
 
 **目标**：归档逻辑收敛为一个 `bin/archive-workspace` 脚本，两个入口共用。
 
-**改动文件**：新建 `bin/archive-workspace`；`orchestrate.sh`；`workflow/SKILL.md`（Phase 0.4 第一步改为调用脚本）；`README.md`（bin 列表补一项）。
+**改动文件**：新建 `bin/archive-workspace`；`orchestrate.sh`；`jflow/SKILL.md`（Phase 0.4 第一步改为调用脚本）；`README.md`（bin 列表补一项）。
 
 **做法**：
 1. 新建 `bin/archive-workspace`（bash，风格对齐现有 bin 脚本）：
@@ -156,7 +158,7 @@ Phase D（改名，随时可做，建议最后做避免和 C 冲突）:  WP11
 2. `orchestrate.sh`：在 `state_cmd init` 之前（约 648 行前）插入：
    - `RESUME_MODE == true` → 跳过归档检查。
    - 否则 `bin/archive-workspace --check-only` 命中时：非 auto 模式询问用户（归档重来 / 改用 --resume / 退出）；auto 模式默认自动归档并 log。
-3. `workflow/SKILL.md` Phase 0.4 第一步：删掉内联 bash 归档示例，改为"调用 `bin/archive-workspace --workspace <workspace>`，输出告知用户"。「流程重入」章节同样改为引用该脚本。
+3. `jflow/SKILL.md` Phase 0.4 第一步：删掉内联 bash 归档示例，改为"调用 `bin/archive-workspace --workspace <workspace>`，输出告知用户"。「流程重入」章节同样改为引用该脚本。
 
 **验收**：
 - 空 workspace 首跑：不归档。
@@ -219,15 +221,15 @@ Phase D（改名，随时可做，建议最后做避免和 C 冲突）:  WP11
 
 ## Phase C：Manifest 完全迁移（核心）
 
-> 目标状态：`orchestrate.sh` 是一个**通用 phase 引擎**——读 workspace `workflow.json` 的 `execution.order`，逐个 phase 按 manifest 元数据执行；prompt、循环、断点、产物、verdict 全部由 manifest + 模板文件驱动；`workflow/SKILL.md` 不再复述任何 phase 契约，只描述编排器行为。改任何一个 phase 只需要改 manifest + 对应 prompt 模板。
+> 目标状态：`orchestrate.sh` 是一个**通用 phase 引擎**——读 workspace `workflow.json` 的 `execution.order`，逐个 phase 按 manifest 元数据执行；prompt、循环、断点、产物、verdict 全部由 manifest + 模板文件驱动；`jflow/SKILL.md` 不再复述任何 phase 契约，只描述编排器行为。改任何一个 phase 只需要改 manifest + 对应 prompt 模板。
 
 ### WP7：Prompt 模板抽取（消除三处重复） ✅（2026-07-13）
 
-**现状**：每个阶段的 prompt 在 `orchestrate.sh` heredoc 和 `workflow/SKILL.md`「各阶段 Prompt」里各写一遍，且已经漂移（SKILL.md 的 revise 有「三步走」和「决策确认规则」，shell 版没有；fix 的「决策确认规则」也只在 SKILL.md）。
+**现状**：每个阶段的 prompt 在 `orchestrate.sh` heredoc 和 `jflow/SKILL.md`「各阶段 Prompt」里各写一遍，且已经漂移（SKILL.md 的 revise 有「三步走」和「决策确认规则」，shell 版没有；fix 的「决策确认规则」也只在 SKILL.md）。
 
 **目标**：每个 phase 一份 prompt 模板文件，两个入口渲染同一份。
 
-**改动文件**：新建 `prompts/` 目录；新建 `bin/render-prompt`（或给 `bin/workflow-manifest` 加子命令，二选一，建议独立脚本保持单一职责）；`orchestrate.sh`；`workflow/SKILL.md`；根 `workflow.json`。
+**改动文件**：新建 `prompts/` 目录；新建 `bin/render-prompt`（或给 `bin/workflow-manifest` 加子命令，二选一，建议独立脚本保持单一职责）；`orchestrate.sh`；`jflow/SKILL.md`；根 `workflow.json`。
 
 **做法**：
 1. 新建模板文件（内容以 **SKILL.md 版本为准**——它更完整；把 orchestrate.sh 版本独有的差异合并进去，逐段 diff 确认无丢失）：
@@ -260,7 +262,7 @@ prompts/
 
 4. 根 `workflow.json` 每个 phase 加字段 `"prompt_template": "prompts/<phase>.md"`；`bin/validate-workflow-manifest` 增加校验：enabled phase 的 prompt_template 文件必须存在。
 5. `orchestrate.sh`：所有 heredoc prompt 替换为 `bin/render-prompt` 调用；`run_phase` 的 DONEEOF 追加段和 `run_analysis_phase` 的 PROMPTEOF 追加段删除（由 footer 承担）。
-6. `workflow/SKILL.md`：「各阶段 Prompt」整章删除，替换为一小节：「阶段 prompt 一律用 `bin/render-prompt --template prompts/<phase>.md` 渲染，token 含义见根 workflow.json 的 naming.tokens；context 块拼接规则如下」+ 保留各 phase 的 context 拼接规则表（这是编排器行为，不是 prompt 内容）。
+6. `jflow/SKILL.md`：「各阶段 Prompt」整章删除，替换为一小节：「阶段 prompt 一律用 `bin/render-prompt --template prompts/<phase>.md` 渲染，token 含义见根 workflow.json 的 naming.tokens；context 块拼接规则如下」+ 保留各 phase 的 context 拼接规则表（这是编排器行为，不是 prompt 内容）。
 
 **验收**：
 - 对每个 phase：迁移前后渲染出的 prompt 逐字符 diff，差异只能是「合并 SKILL.md 增强内容」这类**有意**变化，diff 结果贴在 PR 描述里。
@@ -329,9 +331,9 @@ done
 - ✅ `tests/smoke.sh` 三场景全绿。
 - ✅ fake PASS / review 先 NEEDS_REVISION 后 PASS / code-review 永远 NEEDS_FIX 且 `--max-rounds 1` 退出 2 已验证。
 - ✅ `bin/validate-workflow-manifest` 对 v3 根 manifest 通过；v2 向后兼容由 validator 保留。
-- 待后续回归：`--skip review-code`、`--explore`、`--break implement` 的 fake 场景可作为 WP9 前回归项补跑。
+- ✅ 后续回归补跑：`--skip review-code`、`--explore`、`--break implement` 的 fake 场景纳入 Phase C 收尾验证。
 
-### WP9：shell 入口补齐 review-requirement 和 verify-observability
+### WP9：shell 入口补齐 review-requirement 和 verify-observability ✅（2026-07-22）
 
 **前置**：WP8 完成后，这两个 phase 都是 noninteractive runner，接入近乎免费。
 
@@ -344,13 +346,13 @@ done
 4. `--skip review-requirement` / `--skip verify-observability` 支持。
 5. 更新 README「Shell entry note」和 TODO 中「Do not add ... until explicitly requested」条目（本计划即显式请求）。
 
-**验收**：fake-provider 场景扩展：requirement-review PASS / NEEDS_CLARIFICATION 两分支、observability PASS / NEEDS_FIX 两分支，`tests/smoke.sh` 覆盖。
+**验收**：fake-provider 场景扩展：requirement-review PASS / NEEDS_CLARIFICATION 两分支、observability PASS / NEEDS_FIX 两分支，`tests/smoke.sh` 覆盖。shell 入口和 `/jflow` 现在共享 `execution.default_order`。
 
-### WP10：SKILL.md 瘦身
+### WP10：SKILL.md 瘦身 ✅（2026-07-22）
 
 **前置**：WP7、WP8 完成。
 
-**目标**：`workflow/SKILL.md`（现 744 行）降到 ~300 行以内，只保留：编排器职责、subagent/interactive 判定表、workspace 准备（调 `bin/archive-workspace`）、run workflow 生成规则、每阶段完成后的检查动作（VERDICT、latest 指针、validate-workspace-artifacts）、context 拼接规则表、Codex fallback 规则、流程重入。
+**目标**：`jflow/SKILL.md` 降到 ~300 行以内，只保留：编排器职责、subagent/interactive 判定表、workspace 准备（调 `bin/archive-workspace`）、run workflow 生成规则、每阶段完成后的检查动作（VERDICT、latest 指针、validate-workspace-artifacts）、context 拼接规则表、Codex fallback 规则、流程重入。
 
 **删除/替换**：
 - 「各阶段 Prompt」全部 prompt 正文 → 引用 `prompts/`（WP7 已做大半，本 WP 收尾）。
@@ -358,25 +360,25 @@ done
 - 「产出质量轻量校验」表 → 引用 manifest `artifact_check` + `bin/validate-artifact`。
 - 归档内联 bash → 已在 WP4 替换为脚本调用。
 
-**验收**：瘦身后让一个全新 agent 只读 SKILL.md + manifest + prompts 走一遍 /jflow 流程（可用 fake 场景），确认没有因删文档而丢失必要指令；行数 ≤ 350。
+**验收**：`jflow/SKILL.md` 已压缩到 309 行，行数 ≤ 350；全流程 fake 场景仍通过，说明删减后必要契约由 skill + manifest + prompts + helper 脚本共同承载。
 
 ---
 
 ## Phase D：改名
 
-### WP11：skill 改名 `/workflow` → `/jflow`
+### WP11：skill 改名为 `/jflow` ✅（2026-07-22）
 
 **范围决策**（已定）：只改 skill 名和文档；仓库名 `j-workflow`、workspace 目录 `.workflow/`、`workflow.json`/`workflow-state.json` 文件名**不改**（不与 Claude Code 原生功能冲突，改动收益低、破坏兼容）。
 
-**改动文件**：`workflow/` 目录整体 `git mv workflow jflow`；`jflow/SKILL.md` frontmatter `name: jflow`；全仓引用更新。
+**改动文件**：旧 skill 目录整体迁移为 `jflow/`；`jflow/SKILL.md` frontmatter 改为 `name: jflow`；全仓引用更新。
 
 **做法**：
-1. `git mv workflow jflow`；frontmatter `name: workflow` → `name: jflow`，description 里自称同步改。
-2. `grep -rn '/workflow' --include='*.md' --include='*.sh' .` 逐个更新为 `/jflow`（注意区分 `/workflow` skill 引用与 `.workflow/` 目录路径、`workflow.json` 文件名——后两者不改）。已知引用点：README（多处）、TODO.md、CHANGELOG.md 视情况、`docs/multi-agent-workflow-optimizations/README.md`、各阶段 SKILL.md 若有互相引用。
-3. 删除/精简消歧文案：README「Claude Code note」三条中关于「native dynamic workflow ≠ 本项目 /workflow」的部分可精简为一句；SKILL.md「术语边界」段精简。
+1. 旧 skill 目录迁移为 `jflow/`；frontmatter 改为 `name: jflow`，description 里自称同步改。
+2. 逐个更新旧 slash skill 调用为 `/jflow`（注意区分旧 skill 调用与 `.workflow/` 目录路径、`workflow.json` 文件名——后两者不改）。已知引用点：README（多处）、TODO.md、CHANGELOG.md 视情况、`docs/multi-agent-workflow-optimizations/README.md`、各阶段 SKILL.md 若有互相引用。
+3. 删除/精简消歧文案：README「Claude Code note」三条中关于「native dynamic workflow ≠ 本项目旧 skill 名」的部分可精简为一句；SKILL.md「术语边界」段精简。
 4. 若用户本机以 symlink 方式把本仓库 skill 目录挂到 `~/.claude/skills/`（或 Codex 对应目录），提示重新链接：完成后在最终报告里提醒用户执行相应 re-link。
 
-**验收**：`grep -rn '"/workflow"\|/workflow skill\|调用 /workflow' .` 无残留（`.workflow/` 路径除外）；在 Claude Code 中 `/jflow` 可被识别调用。
+**验收**：旧 slash skill 调用无残留（`.workflow/` 路径、`workflow.json` / `workflow-state.json` 文件名、Claude 原生 `/workflows` 说明除外）；仓库内 skill 已迁移为 `jflow/SKILL.md`。运行时安装目录不会自动更新，只有用户明确要求同步生产时才更新 `~/.claude/skills` 或 Codex 对应 skill 目录。
 
 ---
 
@@ -391,3 +393,7 @@ git diff --check
 ```
 
 外加该 WP 自身的验收标准。全部通过后更新 `CHANGELOG.md`（一行说明 + WP 编号），并在本文档的 WP 标题后标注 ✅ 和完成日期。
+
+## 收尾状态（2026-07-24）
+
+WP0-WP12 已完成。Phase C/D 后的补充收尾包括：`phase_timeout_minutes` 写入 workspace run `workflow.json` 并在 `--resume` 时恢复；`--resume` 启动时打印 `workflow-state.json` 摘要，展示 current phase、last finished phase、current loop/round、artifact validation status 和 exhausted loop marker。Interactive phase 完成信号已统一为 `workflow-state.json` phase status；Ghostty started marker 只用于启动校验，不代表阶段完成。当前没有剩余的高优重构 WP。

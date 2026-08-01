@@ -1,0 +1,314 @@
+#!/usr/bin/env python3
+"""Fetch and rank the Claude models available to the current gateway key."""
+
+import argparse
+import json
+import os
+import re
+import sys
+from pathlib import Path
+from urllib import error, parse, request
+
+
+FAMILIES = ("opus", "sonnet", "haiku")
+FAMILY_FIRST_RE = re.compile(
+    r"(?:^|[.])claude-(opus|sonnet|haiku)-(\d+)(?:-(\d+))?"
+)
+VERSION_FIRST_RE = re.compile(
+    r"(?:^|[.])claude-(\d+)-(\d+)-(opus|sonnet|haiku)(?:-|$)"
+)
+
+
+def build_parser():
+    parser = argparse.ArgumentParser(
+        description="Fetch the live Claude model catalog used during jflow initialization."
+    )
+    parser.add_argument("--format", choices=["json", "text"], default="json")
+    parser.add_argument("--models-url", default="")
+    parser.add_argument("--timeout-seconds", type=float, default=10.0)
+    parser.add_argument("--min-per-family", type=int, default=2)
+    parser.add_argument(
+        "--catalog-file",
+        default="",
+        help="Read a catalog fixture instead of the network (intended for tests).",
+    )
+    return parser
+
+
+def models_url_from_base(base_url, *, bedrock):
+    parsed = parse.urlsplit(base_url)
+    if not parsed.scheme or not parsed.netloc:
+        raise ValueError(f"invalid Claude gateway URL: {base_url}")
+    if bedrock:
+        path = "/v1/models"
+    else:
+        base_path = parsed.path.rstrip("/")
+        path = f"{base_path}/models" if base_path.endswith("/v1") else f"{base_path}/v1/models"
+    return parse.urlunsplit((parsed.scheme, parsed.netloc, path, "", ""))
+
+
+def resolve_models_url(args):
+    if args.models_url:
+        return args.models_url
+    if os.environ.get("JFLOW_CLAUDE_MODELS_URL"):
+        return os.environ["JFLOW_CLAUDE_MODELS_URL"]
+    if os.environ.get("ANTHROPIC_BASE_URL"):
+        return models_url_from_base(os.environ["ANTHROPIC_BASE_URL"], bedrock=False)
+    if os.environ.get("ANTHROPIC_BEDROCK_BASE_URL"):
+        return models_url_from_base(
+            os.environ["ANTHROPIC_BEDROCK_BASE_URL"], bedrock=True
+        )
+    raise ValueError(
+        "no Claude gateway URL; set JFLOW_CLAUDE_MODELS_URL, "
+        "ANTHROPIC_BASE_URL, or ANTHROPIC_BEDROCK_BASE_URL"
+    )
+
+
+def request_headers():
+    headers = {
+        "Accept": "application/json",
+        "Cache-Control": "no-cache",
+        "User-Agent": "jflow-model-discovery/1",
+    }
+    auth_token = os.environ.get("ANTHROPIC_AUTH_TOKEN")
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if auth_token:
+        headers["Authorization"] = f"Bearer {auth_token}"
+    elif api_key:
+        headers["x-api-key"] = api_key
+    return headers
+
+
+def load_catalog(args):
+    if args.catalog_file:
+        with open(args.catalog_file, "r", encoding="utf-8") as file_handle:
+            return json.load(file_handle), {
+                "type": "fixture",
+                "live": False,
+                "path": str(Path(args.catalog_file).resolve()),
+            }
+
+    models_url = resolve_models_url(args)
+    model_request = request.Request(models_url, headers=request_headers(), method="GET")
+    with request.urlopen(model_request, timeout=args.timeout_seconds) as response:
+        payload = json.load(response)
+    return payload, {"type": "gateway", "live": True, "url": models_url}
+
+
+def extract_model_ids(payload):
+    data = payload.get("data") if isinstance(payload, dict) else payload
+    if not isinstance(data, list):
+        raise ValueError("model catalog must contain a data array")
+    result = []
+    seen = set()
+    for item in data:
+        model_id = item.get("id") if isinstance(item, dict) else item
+        if isinstance(model_id, str) and model_id and model_id not in seen:
+            seen.add(model_id)
+            result.append(model_id)
+    return result
+
+
+def parse_model(model_id):
+    match = FAMILY_FIRST_RE.search(model_id)
+    if match:
+        family = match.group(1)
+        major = int(match.group(2))
+        minor = int(match.group(3) or 0)
+    else:
+        match = VERSION_FIRST_RE.search(model_id)
+        if not match:
+            return None
+        major = int(match.group(1))
+        minor = int(match.group(2))
+        family = match.group(3)
+    version = str(major) if minor == 0 else f"{major}.{minor}"
+    return {
+        "id": model_id,
+        "family": family,
+        "version": version,
+        "version_key": (major, minor),
+        "us": model_id.startswith("us."),
+    }
+
+
+def route_priority(candidate, current_model):
+    model_id = candidate["id"]
+    return (
+        0 if model_id == current_model else 1,
+        0 if model_id.startswith(f"us.claude-{candidate['family']}-") else 1,
+        0 if model_id.startswith("us.") else 1,
+        1 if "global" in model_id else 0,
+        len(model_id),
+        model_id,
+    )
+
+
+def rank_family(candidates, current_model, minimum):
+    by_version = {}
+    for candidate in candidates:
+        by_version.setdefault(candidate["version_key"], []).append(candidate)
+
+    selected = []
+    selected_ids = set()
+    for version_key in sorted(by_version, reverse=True):
+        representative = min(
+            by_version[version_key],
+            key=lambda item: route_priority(item, current_model),
+        )
+        selected.append(representative)
+        selected_ids.add(representative["id"])
+
+    if len(selected) < minimum:
+        remaining = sorted(
+            (item for item in candidates if item["id"] not in selected_ids),
+            key=lambda item: (
+                -item["version_key"][0],
+                -item["version_key"][1],
+                route_priority(item, current_model),
+            ),
+        )
+        for candidate in remaining:
+            selected.append(candidate)
+            selected_ids.add(candidate["id"])
+            if len(selected) >= minimum:
+                break
+
+    default_model = next(
+        (item["id"] for item in selected if item["id"] == current_model), None
+    )
+    if default_model is None:
+        default_model = next((item["id"] for item in selected if item["us"]), None)
+    if default_model is None and selected:
+        default_model = selected[0]["id"]
+
+    options = []
+    for candidate in selected:
+        options.append(
+            {
+                "version": candidate["version"],
+                "id": candidate["id"],
+                "us": candidate["us"],
+                "current": candidate["id"] == current_model,
+                "default": candidate["id"] == default_model,
+            }
+        )
+    return {"default": default_model, "options": options}
+
+
+def fallback_result(message, current_model, minimum):
+    warnings = [f"live Claude model discovery failed: {message}"]
+    families = {family: {"default": None, "options": []} for family in FAMILIES}
+    parsed = parse_model(current_model) if current_model else None
+    if parsed:
+        family = parsed["family"]
+        families[family] = rank_family([parsed], current_model, minimum)
+        warnings.append("using ANTHROPIC_MODEL as the only fallback option")
+    else:
+        warnings.append("ANTHROPIC_MODEL is unavailable or not a supported Claude family")
+    return {
+        "source": {"type": "environment-fallback", "live": False},
+        "current_model": current_model or None,
+        "default_model": current_model if parsed else None,
+        "families": families,
+        "warnings": warnings,
+    }
+
+
+def build_result(payload, source, current_model, minimum):
+    parsed_models = []
+    for model_id in extract_model_ids(payload):
+        parsed = parse_model(model_id)
+        if parsed:
+            parsed_models.append(parsed)
+
+    families = {}
+    warnings = []
+    for family in FAMILIES:
+        ranked = rank_family(
+            [item for item in parsed_models if item["family"] == family],
+            current_model,
+            minimum,
+        )
+        families[family] = ranked
+        if len(ranked["options"]) < minimum:
+            warnings.append(
+                f"{family} exposes only {len(ranked['options'])} option(s); "
+                f"requested at least {minimum}"
+            )
+
+    available_ids = {item["id"] for item in parsed_models}
+    default_model = current_model if current_model in available_ids else None
+    if current_model and default_model is None:
+        warnings.append("ANTHROPIC_MODEL is not present in the live gateway catalog")
+    if default_model is None:
+        default_model = next(
+            (
+                families[family]["default"]
+                for family in FAMILIES
+                if families[family]["default"]
+            ),
+            None,
+        )
+    return {
+        "source": source,
+        "current_model": current_model or None,
+        "default_model": default_model,
+        "families": families,
+        "warnings": warnings,
+    }
+
+
+def render_text(result):
+    lines = [
+        f"source: {result['source']['type']}",
+        f"current: {result['current_model'] or '<none>'}",
+    ]
+    for family in FAMILIES:
+        family_data = result["families"][family]
+        lines.append(f"{family.capitalize()} (default: {family_data['default'] or '<none>'})")
+        for option in family_data["options"]:
+            labels = []
+            if option["us"]:
+                labels.append("US")
+            if option["current"]:
+                labels.append("current")
+            if option["default"]:
+                labels.append("default")
+            suffix = f" [{' '.join(labels)}]" if labels else ""
+            lines.append(f"  {option['version']}: {option['id']}{suffix}")
+    for warning in result["warnings"]:
+        lines.append(f"warning: {warning}")
+    return "\n".join(lines)
+
+
+def main():
+    args = build_parser().parse_args()
+    if args.timeout_seconds <= 0:
+        raise ValueError("--timeout-seconds must be positive")
+    if args.min_per_family < 1:
+        raise ValueError("--min-per-family must be positive")
+
+    current_model = os.environ.get("ANTHROPIC_MODEL", "")
+    try:
+        payload, source = load_catalog(args)
+        result = build_result(payload, source, current_model, args.min_per_family)
+    except (OSError, ValueError, json.JSONDecodeError, error.URLError) as exc:
+        result = fallback_result(str(exc), current_model, args.min_per_family)
+
+    if args.format == "json":
+        json.dump(result, sys.stdout, ensure_ascii=False, indent=2)
+        sys.stdout.write("\n")
+    else:
+        print(render_text(result))
+    return 0 if result["default_model"] or any(
+        family["options"] for family in result["families"].values()
+    ) else 2
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except Exception as exc:
+        print(f"[ERROR] list-claude-models: {exc}", file=sys.stderr)
+        raise SystemExit(2)

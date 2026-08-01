@@ -4,7 +4,16 @@ import json
 import os
 import sys
 import tempfile
+import re
 from datetime import datetime, timezone
+
+from workflow_contract import allowed_phase_name, load_manifest, manifest_path_from_state
+
+
+UUID_RE = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+    r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
 
 
 def now_iso():
@@ -36,6 +45,37 @@ def get_phase(state, phase):
     return state.setdefault("phases", {}).setdefault(phase, {})
 
 
+def require_allowed_phase_name(state, phase_name):
+    manifest_path = manifest_path_from_state(state)
+    if not manifest_path:
+        return
+    if not os.path.isfile(manifest_path):
+        raise ValueError(f"workflow manifest not found: {manifest_path}")
+    if not allowed_phase_name(load_manifest(manifest_path), phase_name):
+        raise ValueError(f"phase is not allowed by workflow manifest: {phase_name}")
+
+
+def require_running_phase(state, phase_name):
+    require_allowed_phase_name(state, phase_name)
+    phase = state.get("phases", {}).get(phase_name)
+    if phase is None:
+        raise ValueError(f"phase has not been started: {phase_name}")
+    if phase.get("status") != "running":
+        raise ValueError(f"phase is not running: {phase_name}")
+    return phase
+
+
+def finish_phase(state, phase_name, status, exit_code, output_file):
+    phase = require_running_phase(state, phase_name)
+    phase.update({
+        "status": status,
+        "exit_code": exit_code,
+        "ended_at": now_iso(),
+    })
+    if output_file:
+        phase["output_file"] = output_file
+
+
 def cmd_init(args):
     state = load_state(args.file)
     state.update({
@@ -55,6 +95,7 @@ def cmd_init(args):
 
 def cmd_phase_start(args):
     state = load_state(args.file)
+    require_allowed_phase_name(state, args.phase)
     phase = get_phase(state, args.phase)
     phase.update({
         "status": "running",
@@ -73,22 +114,38 @@ def cmd_phase_start(args):
 
 def cmd_phase_finish(args):
     state = load_state(args.file)
-    phase = get_phase(state, args.phase)
-    phase.update({
-        "status": args.status,
-        "exit_code": args.exit_code,
-        "ended_at": now_iso(),
-    })
-    if args.output_file:
-        phase["output_file"] = args.output_file
+    finish_phase(state, args.phase, args.status, args.exit_code, args.output_file)
+    state["updated_at"] = now_iso()
+    save_state(args.file, state)
+
+
+def cmd_phase_finish_active(args):
+    state = load_state(args.file)
+    phase_name = state.get("metadata", {}).get("current_phase")
+    if not isinstance(phase_name, str) or not phase_name:
+        raise ValueError("metadata.current_phase is required to finish the active phase")
+    finish_phase(state, phase_name, args.status, args.exit_code, args.output_file)
     state["updated_at"] = now_iso()
     save_state(args.file, state)
 
 
 def cmd_set_session_id(args):
     state = load_state(args.file)
-    phase = get_phase(state, args.phase)
+    phase = require_running_phase(state, args.phase)
     phase["session_id"] = args.session_id
+    state["updated_at"] = now_iso()
+    save_state(args.file, state)
+
+
+def cmd_set_main_agent(args):
+    if not UUID_RE.fullmatch(args.session_id):
+        raise ValueError(f"main agent session id must be a UUID: {args.session_id}")
+    state = load_state(args.file)
+    state["main_agent"] = {
+        "provider": args.provider,
+        "session_id": args.session_id,
+        "recorded_at": now_iso(),
+    }
     state["updated_at"] = now_iso()
     save_state(args.file, state)
 
@@ -102,7 +159,10 @@ def cmd_set_workflow_meta(args):
 
 def cmd_set_phase_field(args):
     state = load_state(args.file)
-    phase = get_phase(state, args.phase)
+    require_allowed_phase_name(state, args.phase)
+    phase = state.get("phases", {}).get(args.phase)
+    if phase is None:
+        raise ValueError(f"phase has not been started: {args.phase}")
     phase[args.key] = args.value
     state["updated_at"] = now_iso()
     save_state(args.file, state)
@@ -124,6 +184,14 @@ def cmd_get_phase_field(args):
 def cmd_get_workflow_meta(args):
     state = load_state(args.file)
     value = state.get("metadata", {}).get(args.key, "")
+    if value is None:
+        value = ""
+    print(value)
+
+
+def cmd_get_main_agent(args, key):
+    state = load_state(args.file)
+    value = state.get("main_agent", {}).get(key, "")
     if value is None:
         value = ""
     print(value)
@@ -163,11 +231,24 @@ def build_parser():
     p.add_argument("--output-file")
     p.set_defaults(func=cmd_phase_finish)
 
+    p = sub.add_parser("phase-finish-active")
+    p.add_argument("--file", required=True)
+    p.add_argument("--status", required=True, choices=["done", "failed", "skipped"])
+    p.add_argument("--exit-code", required=True)
+    p.add_argument("--output-file")
+    p.set_defaults(func=cmd_phase_finish_active)
+
     p = sub.add_parser("set-session-id")
     p.add_argument("--file", required=True)
     p.add_argument("--phase", required=True)
     p.add_argument("--session-id", required=True)
     p.set_defaults(func=cmd_set_session_id)
+
+    p = sub.add_parser("set-main-agent")
+    p.add_argument("--file", required=True)
+    p.add_argument("--provider", required=True, choices=["claude", "codex"])
+    p.add_argument("--session-id", required=True)
+    p.set_defaults(func=cmd_set_main_agent)
 
     p = sub.add_parser("set-workflow-meta")
     p.add_argument("--file", required=True)
@@ -202,6 +283,14 @@ def build_parser():
     p.add_argument("--file", required=True)
     p.add_argument("--key", required=True)
     p.set_defaults(func=cmd_get_workflow_meta)
+
+    p = sub.add_parser("get-main-agent-session-id")
+    p.add_argument("--file", required=True)
+    p.set_defaults(func=lambda args: cmd_get_main_agent(args, "session_id"))
+
+    p = sub.add_parser("get-main-agent-provider")
+    p.add_argument("--file", required=True)
+    p.set_defaults(func=lambda args: cmd_get_main_agent(args, "provider"))
 
     return parser
 

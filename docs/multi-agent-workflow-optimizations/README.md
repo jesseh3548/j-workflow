@@ -38,11 +38,11 @@ Related:
 **Fix**: 新增 `--model-<phase>` 参数覆盖特定阶段，未指定的继承 `--model` 全局默认。涉及阶段：explore、design、review、revise、implement、review-code。示例：
 ```bash
 orchestrate.sh --project ~/code/xxx --requirement req.md \
-  --model claude-sonnet-4-6 \
-  --model-design claude-opus-4-6 \
-  --model-review claude-opus-4-6
+  --model '<本次初始化实时选择的 Claude model ID>' \
+  --model-design '<本次初始化实时选择的 Claude model ID>' \
+  --model-review '<本次初始化实时选择的 Claude model ID>'
 ```
-需改动：orchestrate.sh（参数解析 + run_phase 读取阶段模型）、workflow skill（支持生成新参数）、README。
+需改动：orchestrate.sh（参数解析 + run_phase 读取阶段模型）、jflow skill（支持生成新参数）、README。
 
 **已完成（CLI/config，2026-07-08）**:
 - `orchestrate.sh` 支持 `--model-explore`、`--model-design`、`--model-review` / `--model-review-plan`、`--model-revise`、`--model-implement`、`--model-review-code`、`--model-fix`。
@@ -66,7 +66,7 @@ orchestrate.sh --project ~/code/xxx --requirement req.md \
 **Fix**: 对 plan.md 和 review.md 做章节标题校验，缺少必需章节时警告或重跑。
 
 **已完成（skill 规则 + 脚本级校验，2026-07-09）**:
-- `/workflow` skill 增加轻量产物质量校验表。
+- `/jflow` skill 增加轻量产物质量校验表。
 - 覆盖 requirement-review、plan、implementation-brief、review、impl-notes、code-review、fix-notes、observability-report 的必需章节和 VERDICT。
 - `bin/validate-artifact` 已提供脚本级产物校验，`orchestrate.sh` 只负责调用，避免 shell 入口只检查文件存在。
 - 交互阶段 prompt 已要求：与用户交流后若最终结论/边界/取舍变化，必须先回写产出文档，再通过 `workflow-state.json` 写入完成状态。
@@ -75,7 +75,7 @@ orchestrate.sh --project ~/code/xxx --requirement req.md \
 
 **Problem**: 当前编排器是独立 shell 脚本 (`orchestrate.sh`)，入口在终端而非 Claude Code。用户需要离开 Claude Code 去终端执行命令，编排器的断点交互（`read`）也很原始，无法灵活调整参数、跳过阶段或与编排器对话。
 
-**Fix**: 将编排逻辑从 `orchestrate.sh` 迁入 Claude Code skill（`/workflow` 或新 skill），用 Bash `run_in_background` 驱动：
+**Fix**: 将编排逻辑从 `orchestrate.sh` 迁入 Claude Code skill（`/jflow` 或新 skill），用 Bash `run_in_background` 驱动：
 
 1. Claude Code 做准备工作（理解需求、拉飞书文档、生成 requirement.md、确认参数）
 2. 每个阶段：Bash `run_in_background` 开 Ghostty 新 tab + 轮询 `workflow-state.json`
@@ -98,7 +98,7 @@ orchestrate.sh --project ~/code/xxx --requirement req.md \
 - 介入方式：在当前 tab 里告诉 agent 停下（或 Ctrl+C），回到主对话说"需求改了，回到 design"
 
 **涉及改动**：
-- 新建或重构 `/workflow` skill 为编排器
+- 新建或重构 `/jflow` skill 为编排器
 - `open_ghostty_tab` + run script 生成逻辑迁入 skill
 - 产出归档逻辑（`archive/round-N/`）
 - `orchestrate.sh` 降级为可选的 CLI 入口（或废弃）
@@ -144,7 +144,7 @@ orchestrate.sh --project ~/code/xxx --requirement req.md \
 
 **涉及改动**：
 - `orchestrate.sh` — 每个阶段完成后调用通知
-- `workflow/SKILL.md` — 编排器在阶段间确认前发通知
+- `jflow/SKILL.md` — 编排器在阶段间确认前发通知
 - 新增 `bin/notify-lark.sh`（或内联到编排器），安装时同步到当前 provider 的工具目录
 - 配置文件新增 `LARK_WEBHOOK_URL` 字段
 
@@ -177,7 +177,7 @@ orchestrate.sh --project ~/code/xxx --requirement req.md \
 - 或用 subagent 并行审视不同章节
 
 **涉及改动**：
-- `workflow/SKILL.md` — Phase 0 新增摘要步骤，各阶段 prompt 改为引用摘要
+- `jflow/SKILL.md` — Phase 0 新增摘要步骤，各阶段 prompt 改为引用摘要
 - `orchestrate.sh` — 同步新增摘要步骤
 - 新增 `summarize-requirement/SKILL.md`（或内联到编排器），安装时同步到当前 provider 的 skills 目录
 - 各阶段 prompt 中 `requirement.md` 引用改为 `requirement-summary.md` + 按需引用原文
@@ -220,7 +220,7 @@ orchestrate.sh --project ~/code/xxx --requirement req.md \
 
 **涉及改动**：
 - 新增 `workflow.json` 模板
-- `orchestrate.sh` / workflow skill 改为读 JSON 驱动
+- `orchestrate.sh` / jflow skill 改为读 JSON 驱动
 - 支持 `--flow <path>` 参数指定自定义流程
 
 **已完成（manifest v2，2026-07-09）**:
@@ -232,24 +232,30 @@ orchestrate.sh --project ~/code/xxx --requirement req.md \
 - `orchestrate.sh` 已从 manifest 读取 artifact path、prompt/run/started marker 命名模板、artifact validation 规则，以及 review/revise、review-code/fix 的 verdict transition。
 - `orchestrate.sh` 已根据 workspace `workflow.json` 的 `execution.order` 设置 shell phase 开关；review/revise 与 review-code/fix 的循环体仍保留显式 shell 控制流。
 - 新增 `bin/validate-workspace-artifacts` 校验 workspace 产物命名、latest 指针、review/fix 轮次连续、禁止 plan 变体，以及 state phase name 是否符合 manifest 模板。
-- README / workflow skill 说明：当前 manifest 用于统一描述和留档，执行循环仍由显式脚本/skill 流程驱动。
+- README / jflow skill 说明：当前 manifest 用于统一描述和留档，执行循环仍由显式脚本/skill 流程驱动。
 
-**仍需跟进**:
-- 逐步让 `orchestrate.sh` 从 workspace run workflow 读取 confirm/model/mode 等简单字段。
-- 后续可继续把 breakpoint/confirm 策略从 shell 变量迁到 run workflow。
+**已完成（manifest v3 / Phase C，2026-07-22）**:
+- `orchestrate.sh` 已改为通用 phase 引擎，按 workspace run `workflow.json` 的 `execution.order` 执行。
+- 根 manifest 使用 `execution.default_order`，shell 入口和 `/jflow` 共用同一默认顺序，包含 `review-requirement` 和 `verify-observability`。
+- review/revise 与 review-code/fix 循环、breakpoint、artifact updates、VERDICT transition 由 manifest 元数据驱动。
+- `jflow/SKILL.md` 已瘦身为编排器规则文档，详细阶段契约由 `workflow.json`、`prompts/` 和 `bin/` 脚本承载。
 
-### 21. workflow.json 状态持久化（高优）
+**历史备注**:
+- 当前大修已收口；后续只在出现新需求时追加有明确验收标准的 follow-up。
 
-**Problem**: 当前用 `.done` 文件 + Claude 内存记录进度，不可靠。断点续跑时需要 glob 扫描 `.done` 文件推断状态，容易出错。
+### 21. workflow.json 状态持久化（高优，已完成）
+
+**Problem（历史）**: 早期版本用 `.done` 文件 + Claude 内存记录进度，不可靠。断点续跑时需要 glob 扫描 `.done` 文件推断状态，容易出错。
 
 **Fix**: 在 workspace 中维护 `workflow-state.json`，记录每阶段状态（pending/running/done/failed）、开始/结束时间、产出文件路径、session ID。编排器启动时读取状态文件恢复进度，替代 `.done` 文件和内存。
 
-**当前状态（部分完成）**:
+**已完成（state v2 / Phase C，2026-07-22）**:
 - `bin/workflow-state` 已记录 workflow/task/provider/model/project/workspace、phase status、session_name、session_id、output_file、prompt_file、run_script、started_at、ended_at、exit_code，并作为 interactive phase 的唯一完成信号。
 - 新增 workflow-level `metadata`，当前用于记录 workspace run `flow_file`、`source_manifest`、`flow_schema_version`、`ghostty_window_id`、`current_phase`、`last_finished_phase`、`current_loop`、`current_round`、`artifact_validation_status`、`last_artifact_validation`。
 - review/revise 与 review-code/fix 循环会在 phase state 中记录 `round`、`loop`、`transition`、`resume_from`。
 - 新增 `bin/validate-workflow-state` 做结构和合法值硬校验，`orchestrate.sh` 只负责调用。
 - 续接策略已留档：revise 从 design 读取 session_id，fix 从 implement 读取 session_id；Claude 可回退 session name，Codex 必须有 session_id。
+- Interactive phase 仍需要等待外部 tab 内 agent 完成，但等待对象是 `workflow-state.json` 中的 phase status，不是 `.done` 文件。started marker 只用于验证 Ghostty tab 是否成功启动，不表示阶段完成。
 
 ### 22. 输入摘要机制（中优）
 
@@ -355,12 +361,12 @@ orchestrate.sh --project ~/code/xxx --requirement req.md \
 - `workflow-state.json` 应该是 Workflow Run 的持久化视图，还是事件日志 / 状态快照组合？
 - `workflow.json` 是流程定义的 DSL，还是 Agent Role 的配置集合？
 - provider 自动推断、显式选择和主 agent 传参应归属于哪个领域服务？
-- `orchestrate.sh` 和 `/workflow` skill 是否共享同一个领域模型和脚本 helper？
+- `orchestrate.sh` 和 `/jflow` skill 是否共享同一个领域模型和脚本 helper？
 - 重入、归档、并行 worktree 应该由 Workflow Run 管，还是由独立的 Workspace/Execution 服务管？
 
 **产出目标**：
 - 新增 `docs/domain-model.md` 或 ADR，记录领域对象、关系、状态机和关键不变量
-- 基于领域模型再拆分脚本 helper，避免 `orchestrate.sh` 和 `/workflow` skill 重复实现
+- 基于领域模型再拆分脚本 helper，避免 `orchestrate.sh` 和 `/jflow` skill 重复实现
 - 为后续 #20 声明式 flow JSON、#21 workflow-state.json、#24 并行 worktree、#26 重入质量修复提供统一设计基础
 
 ### 30. design agent 引入 DDD 设计方法（中优）
@@ -403,7 +409,7 @@ orchestrate.sh --project ~/code/xxx --requirement req.md \
 
 ### 32. 纯分析阶段迁移到原生 Agent / 非 Ghostty 执行（中优，部分完成）
 
-**Problem**: 当前所有阶段都通过 Ghostty 新 tab 启动独立 session，并用 `.done` 文件轮询。对 review-requirement、explore、review-plan、review-code、verify-observability 这类纯分析阶段来说，开 tab、生成 run script、导出环境变量、AppleScript、轮询完成标记都偏重。
+**Problem（历史）**: 早期版本所有阶段都通过 Ghostty 新 tab 启动独立 session，并用完成 marker 轮询。对 review-requirement、explore、review-plan、review-code、verify-observability 这类纯分析阶段来说，开 tab、生成 run script、导出环境变量、AppleScript、轮询完成状态都偏重。
 
 **Fix**: 将纯分析阶段改为更轻量的执行模式，保留 design / implement / revise / fix 的 Ghostty 隔离和可交互续接。
 
@@ -415,7 +421,7 @@ orchestrate.sh --project ~/code/xxx --requirement req.md \
 - verify-observability：纯验证，产出验证报告
 
 **实现方向**：
-- `/workflow` skill 中优先用原生 Agent tool 调用这些阶段，Agent 返回即完成，不写 marker 文件
+- `/jflow` skill 中优先用原生 Agent tool 调用这些阶段，Agent 返回即完成，不写 marker 文件
 - `orchestrate.sh` 可选增加 `run_phase_native` / print-mode 执行路径，用于非交互分析阶段
 - design / implement / revise / fix 继续使用 Ghostty tab，因为它们需要深度交互、跨天续接或精确 resume
 
@@ -424,19 +430,19 @@ orchestrate.sh --project ~/code/xxx --requirement req.md \
 - 原生 Agent 模式和独立 session 隔离目标是否冲突，需要明确“隔离”的最低要求是上下文隔离还是终端 tab 隔离
 
 **涉及改动**：
-- `workflow/SKILL.md`
+- `jflow/SKILL.md`
 - `orchestrate.sh`
 
 **已完成（skill 流程，2026-06-22）**:
-- `/workflow` skill 已将 review-requirement、review-plan、review-code、verify-observability 定义为 Subagent phase。
+- `/jflow` skill 已将 review-requirement、review-plan、review-code、verify-observability 定义为 Subagent phase。
 - Subagent phase 不生成 run script、不打开 Ghostty tab、不写 marker 文件，由主 agent 通过 Agent tool 派发、检查报告和 VERDICT。
 - explore 暂不子 agent 化，避免与 Claude 原生 Explore subagent 混淆。
 - design / revise / implement / fix 保持 Ghostty interactive phase。
 - Codex 无 Agent tool 时不强行模拟复杂子 agent，按同一约束直接执行分析 phase 或使用已验证的非交互 CLI runner。
 
-**仍需跟进**:
-- 让 shell 入口 `orchestrate.sh` 与 skill 流程术语完全对齐，避免未来维护时从 shell 实现倒推 skill 设计。
-- 等 review-requirement / verify-observability 在 shell 编排器中接入完整 phase 后，复用同一分析 runner 约束。
+**历史备注**:
+- shell 入口 `orchestrate.sh` 与 `/jflow` 流程术语已在 Phase C/D 中对齐。
+- review-requirement / verify-observability 已接入 shell 编排器并复用同一分析 runner 约束。
 
 ### 33. Ghostty 窗口选择持久化与手动指定（低优）
 
@@ -446,7 +452,7 @@ orchestrate.sh --project ~/code/xxx --requirement req.md \
 - 在 `workflow-state.json` 增加 workflow-level metadata，记录 `ghostty_window_id`
 - `orchestrate.sh --resume` 优先读取 state 中的窗口 id，只有缺失时才重新检测 frontmost window
 - 增加显式参数 `--ghostty-window-id <id>`，允许用户手动指定目标窗口
-- `workflow/SKILL.md` 同步说明窗口 id 的保存、恢复和手动覆盖规则
+- `jflow/SKILL.md` 同步说明窗口 id 的保存、恢复和手动覆盖规则
 
 **暂缓原因**: 当前 `workflow-state` helper 还没有通用 metadata API，强行写入会扩大状态模型改动面。先用进程变量解决“每阶段误开新窗口”的主要问题。
 
@@ -467,7 +473,7 @@ orchestrate.sh --project ~/code/xxx --requirement req.md \
 
 **涉及改动**:
 - `explore/SKILL.md`
-- `workflow/SKILL.md`（如有阶段说明需要澄清）
+- `jflow/SKILL.md`（如有阶段说明需要澄清）
 
 **已完成（skill 规则，2026-07-08）**:
 - `explore/SKILL.md` 改为 provider-aware 探索。
@@ -488,51 +494,51 @@ orchestrate.sh --project ~/code/xxx --requirement req.md \
 
 **Fix**:
 - 新增或重命名 `investigate/SKILL.md`。
-- `workflow/SKILL.md` 和 `orchestrate.sh` 将 Phase 1 从 `/explore` 改为 `/investigate`。
+- `jflow/SKILL.md` 和 `orchestrate.sh` 将 Phase 1 从 `/explore` 改为 `/investigate`。
 - 保留 `explore/SKILL.md` 作为兼容 wrapper，提示“请调用 /investigate skill”。
 - README、CHANGELOG、backlog 中更新命名说明。
 
 **涉及改动**:
 - `explore/SKILL.md`
 - `investigate/SKILL.md`
-- `workflow/SKILL.md`
+- `jflow/SKILL.md`
 - `orchestrate.sh`
 - `README.md`
 - `CHANGELOG.md`
 
-### 36. `/workflow` skill 与 Claude 原生 Dynamic Workflow 概念冲突（中优）
+### 36. `/jflow` skill 与 Claude 原生 Dynamic Workflow 概念冲突（中优）
 
-**Problem**: Claude Code 现在会在普通实现任务中弹出 `Run a dynamic workflow?` 确认页，例如自动规划 `Scan Patterns / Create Models / Create Controllers / Create Skill / Verify` 等阶段，并提示可用 `/workflows` 管理、在 `/config` 关闭。这不是本项目 `/workflow` skill 内部流程触发的，但名字和语义容易混淆：用户看到 "workflow" 可能无法判断是 Claude 原生 dynamic workflow，还是本项目的 `/workflow` 编排器。
+**Problem**: Claude Code 现在会在普通实现任务中弹出 `Run a dynamic workflow?` 确认页，例如自动规划 `Scan Patterns / Create Models / Create Controllers / Create Skill / Verify` 等阶段，并提示可用 `/workflows` 管理、在 `/config` 关闭。这不是本项目 `/jflow` skill 内部流程触发的，但名字和语义容易混淆：用户看到 "workflow" 可能无法判断是 Claude 原生 dynamic workflow，还是本项目的 `/jflow` 编排器。
 
 另一个相关现象是 Claude 原生 dynamic workflow 或非交互子流程可能报 `Please run /login · API Error: 401 Authentication Error, No api key passed in.`。这通常不是 j-workflow phase 产物合同失败，而是 Claude Code 原生 workflow/subagent 执行路径没有拿到当前会话的认证态，或走到了需要 `ANTHROPIC_API_KEY` 的 API-key 认证路径。
 
 **Clarification**:
 - Claude 原生 Dynamic Workflow：Claude Code runtime 的能力，用于把大任务拆成多个并行 subagents，可能消耗大量 token，并由 Claude Code 自己弹出确认。
-- 本项目 `/workflow` skill：需求到设计、评审、实现、代码评审的工程编排器，产物落在 `.workflow/<name>/`，有固定 phase/output/VERDICT 合同。
+- 本项目 `/jflow` skill：需求到设计、评审、实现、代码评审的工程编排器，产物落在 `.workflow/<name>/`，有固定 phase/output/VERDICT 合同。
 - 这不是当前 flow 内部 bug，而是命名和概念重叠导致的认知冲突。
 - 认证错误需要单独处理：不能假设原生 dynamic workflow 一定继承当前交互式 Claude Code 的 `/login` 状态。
 
 **Potential positive use**:
 - 在本项目 `implement` 阶段中，如果 provider 是 Claude Code，且任务天然可以拆分为低耦合子任务（如批量创建模型、批量补测试、多个独立 endpoint），可以允许 implement agent 在明确提示用户并获得确认后调用 Claude 原生 dynamic workflow。
-- 原生 dynamic workflow 只能作为 implement 阶段内部的执行加速手段，不能替代 `/workflow` 的阶段产物合同：仍必须写 `implement/impl-notes.md`，仍必须接受 `review-code` 阶段检查。
+- 原生 dynamic workflow 只能作为 implement 阶段内部的执行加速手段，不能替代 `/jflow` 的阶段产物合同：仍必须写 `implement/impl-notes.md`，仍必须接受 `review-code` 阶段检查。
 - 不应在 review-plan / review-code 这类分析 phase 中触发原生 dynamic workflow，避免 token 爆炸和上下文不可控。
 - 如果原生 dynamic workflow 报 `/login` 或 `No api key passed in`，implement agent 应停止使用该能力，回退到普通实现流程，并在 `impl-notes.md` 记录认证阻塞；不要反复重试消耗 token。
 
 **Fix**:
-- 在 `workflow/SKILL.md` 中增加术语说明：`/workflow` skill 与 Claude Code `/workflows` / dynamic workflow 是不同机制。
+- 在 `jflow/SKILL.md` 中增加术语说明：`/jflow` skill 与 Claude Code `/workflows` / dynamic workflow 是不同机制。
 - 将本项目文档中的泛化 "workflow" 表述收窄为 "j-workflow orchestration" 或 "phase orchestration"，减少误导。
 - 在 `implement/SKILL.md` 中增加可选规则：只有在用户确认、任务可并行、且能保持产物合同时，Claude implement agent 才可使用原生 dynamic workflow。
 - 在 `implement/SKILL.md` 中增加认证前置检查：使用原生 dynamic workflow 前确认 Claude Code auth 可用；遇到 401 `/login` / `No api key passed in` 时回退到普通实现，不把它当作代码实现失败。
 - 在 README 中补充一段 provider-specific note，说明 Claude Code dynamic workflow 弹窗不代表 j-workflow 正在运行。
 
 **涉及改动**:
-- `workflow/SKILL.md`
+- `jflow/SKILL.md`
 - `implement/SKILL.md`
 - `README.md`
 - `docs/multi-agent-workflow-optimizations/README.md`
 
 **已完成（skill/docs，2026-07-08）**:
-- `workflow/SKILL.md` 增加术语边界：j-workflow `/workflow` 与 Claude Code `/workflows` / dynamic workflow 不是同一机制。
+- `jflow/SKILL.md` 增加术语边界：j-workflow `/jflow` 与 Claude Code `/workflows` / dynamic workflow 不是同一机制。
 - `implement/SKILL.md` 增加 Claude 原生 dynamic workflow 使用边界、用户确认要求和 401 回退规则。
 - README 增加 Claude Code provider note。
 
@@ -555,7 +561,7 @@ orchestrate.sh --project ~/code/xxx --requirement req.md \
 - Option C：保持两个阶段但复用同一 provider session：implement 续接 design session，并在开始实现前强制重新读取完整 `plan.md` 和 plan-derived `implementation-brief.md`；文件优先于历史上下文，冲突时回到 design/revise 修 design 产物。
 
 **涉及改动**:
-- `workflow/SKILL.md`
+- `jflow/SKILL.md`
 - `design/SKILL.md`
 - `implement/SKILL.md`
 - `orchestrate.sh`
@@ -579,6 +585,6 @@ Repository source paths:
 - `implement/SKILL.md` — TDD 实现 skill
 - `review-code/SKILL.md` — 代码评审 skill
 - `verify-observability/SKILL.md` — 可观测性验证 skill
-- `workflow/SKILL.md` — 编排器 skill
+- `jflow/SKILL.md` — 编排器 skill
 
 Provider install locations are environment-specific. Do not assume `~/.claude` exists in Codex-only environments; Claude Code defaults to `~/.claude` and may be overridden with `CLAUDE_HOME`, while Codex defaults to `~/.codex` and may be overridden with `CODEX_HOME`.

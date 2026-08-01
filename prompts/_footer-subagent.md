@@ -1,6 +1,6 @@
 
 执行模式：Subagent phase。
-- 你是由 /workflow 主 agent 派发的独立分析子 agent。
+- 你是由 /jflow 主 agent 派发的独立分析子 agent。
 - 直接完成任务并写入指定输出文件：{output_file}
 - 不要等待用户确认，不要写 marker 文件。
 - 不要修改业务代码；除指定报告/验证产物外不要写其他文件。
